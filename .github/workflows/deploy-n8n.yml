@@ -1,0 +1,278 @@
+name: Deploy n8n to Fly.io
+
+# Workflow triggers
+# Documentation: https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows
+"on":
+  # Run daily at 2 AM UTC to check for new versions
+  # Cron syntax: minute hour day month day-of-week
+  # Documentation: https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#schedule
+  schedule:
+    - cron: '0 2 * * *'
+
+  # Allow manual triggering from GitHub Actions UI
+  # This enables on-demand deployments from the Actions tab
+  # Documentation: https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflow_dispatch
+  workflow_dispatch:
+
+# Prevent concurrent deployments to avoid conflicts
+# cancel-in-progress: false ensures running deployments complete before new ones start
+# This prevents race conditions and ensures data consistency
+# Documentation: https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#concurrency
+concurrency:
+  group: deploy-n8n
+  cancel-in-progress: false
+
+# Define permissions needed for this workflow
+permissions:
+  contents: read
+
+jobs:
+  check-and-deploy:
+    name: Check for updates and deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout the repository to access fly.toml and scripts
+      # Documentation: https://github.com/actions/checkout
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # Install Fly.io CLI (flyctl) for deployment operations
+      # Documentation: https://github.com/superfly/flyctl-actions
+      - name: Install Fly.io CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # Step 1: Verify required secrets are configured
+      - name: Verify required secrets
+        run: |
+          # Check if FLY_API_TOKEN is set
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "ERROR: FLY_API_TOKEN secret is not configured"
+            echo "Please add FLY_API_TOKEN to your repository secrets"
+            echo "See: https://docs.github.com/en/actions/security-guides/encrypted-secrets"
+            exit 1
+          fi
+          echo "✓ Required secrets are configured"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Step 2: Detect latest stable version from Docker Hub
+      # This step queries the Docker Hub API to find the latest stable n8n version
+      # It filters out pre-release versions (beta, alpha, rc) and non-semantic version tags
+      # Docker Hub API documentation: https://docs.docker.com/docker-hub/api/latest/
+      - name: Detect latest n8n version from Docker Hub
+        id: detect-version
+        run: |
+          source scripts/version-detection.sh
+
+          echo "Querying Docker Hub for latest n8n version..."
+
+          # Query Docker Hub API for available tags
+          # Uses: GET https://hub.docker.com/v2/repositories/n8nio/n8n/tags
+          response=$(query_dockerhub_tags)
+          if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to query Docker Hub"
+            exit 1
+          fi
+
+          # Extract tag names, filter out pre-releases, and find the highest semantic version
+          # Filtering logic:
+          # - Excludes tags with hyphens (pre-release identifiers like 1.0.0-beta)
+          # - Excludes non-semantic tags (latest, next, etc.)
+          # - Sorts remaining versions using semantic versioning rules
+          tags=$(extract_tag_names "$response")
+          latest_version=$(echo "$tags" | filter_stable_versions | find_latest_version)
+
+          if [ -z "$latest_version" ]; then
+            echo "ERROR: Could not determine latest stable version"
+            exit 1
+          fi
+
+          echo "Latest stable version: $latest_version"
+          # Set output variable for use in subsequent steps
+          echo "latest_version=$latest_version" >> $GITHUB_OUTPUT
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Step 3: Query current deployed version from Fly.io
+      # This step checks what version is currently deployed by querying Fly.io
+      # If the app is not yet deployed, it will proceed with initial deployment
+      # Fly.io CLI documentation: https://fly.io/docs/flyctl/
+      - name: Query current deployed version
+        id: current-version
+        run: |
+          source scripts/version-detection.sh
+
+          echo "Querying current deployed version from Fly.io..."
+
+          # Extract app name from fly.toml configuration file
+          # Format: app = "your-app-name"
+          app_name=$(grep "^app = " fly.toml | cut -d'"' -f2)
+
+          if [ -z "$app_name" ]; then
+            echo "ERROR: Could not extract app name from fly.toml"
+            exit 1
+          fi
+
+          echo "App name: $app_name"
+
+          # Query current version from Fly.io deployment
+          # Uses: flyctl status --json to get deployment information
+          # Parses the Image field to extract the version tag
+          current_version=$(query_flyio_version "$app_name")
+          query_exit_code=$?
+
+          # Handle authentication errors (exit code 2 indicates auth failure)
+          # This can occur if FLY_API_TOKEN is invalid or expired
+          if [ $query_exit_code -eq 2 ]; then
+            echo "ERROR: Authentication failed"
+            exit 1
+          fi
+
+          # If no version found (app not deployed yet), set to empty string
+          # This will trigger an initial deployment in the comparison step
+          if [ $query_exit_code -ne 0 ]; then
+            current_version=""
+          fi
+
+          echo "Current version: ${current_version:-not deployed}"
+          # Set output variables for use in subsequent steps
+          echo "current_version=$current_version" >> $GITHUB_OUTPUT
+          echo "app_name=$app_name" >> $GITHUB_OUTPUT
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Step 4: Compare versions and determine if update is needed
+      # This step uses semantic versioning rules to determine if deployment is needed
+      # Deployment is triggered if: latest > current OR current is empty (initial deployment)
+      # Semantic versioning: https://semver.org/
+      - name: Compare versions
+        id: compare
+        run: |
+          source scripts/version-detection.sh
+
+          # Retrieve version information from previous steps
+          current_version="${{ steps.current-version.outputs.current_version }}"
+          latest_version="${{ steps.detect-version.outputs.latest_version }}"
+
+          echo "Comparing versions..."
+          echo "Current: ${current_version:-not deployed}"
+          echo "Latest: $latest_version"
+
+          # Check if update is needed using semantic version comparison
+          # Comparison logic:
+          # - Splits versions into major.minor.patch components
+          # - Compares each component numerically
+          # - Returns true if latest > current or if current is empty (initial deployment)
+          if needs_update "$current_version" "$latest_version"; then
+            echo "✓ Update needed: $latest_version is newer"
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            log_version_check "$current_version" "$latest_version" "update needed"
+          else
+            echo "✓ Already up to date"
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+            log_version_check "$current_version" "$latest_version" "no update needed"
+          fi
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Step 5: Deploy new version (conditional - only if update is needed)
+      # This step only runs if the comparison determined an update is needed
+      # It uses flyctl to deploy the new Docker image while preserving all configuration
+      # The --image flag ensures only the image is updated, not volumes or other settings
+      # Conditional execution documentation:
+      # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsif
+      - name: Deploy new version to Fly.io
+        if: steps.compare.outputs.needs_update == 'true'
+        id: deploy
+        run: |
+          source scripts/version-detection.sh
+
+          app_name="${{ steps.current-version.outputs.app_name }}"
+          latest_version="${{ steps.detect-version.outputs.latest_version }}"
+
+          echo "Deploying n8n version $latest_version to $app_name..."
+
+          # Deploy to Fly.io using the deploy_to_flyio function
+          # Command: flyctl deploy --app <app> --image n8nio/n8n:<version>
+          # The --image flag tells Fly.io to:
+          # - Use the specified Docker image
+          # - Preserve all settings from fly.toml (volumes, environment, etc.)
+          # - Only update the container image, nothing else
+          # Fly.io deployment documentation: https://fly.io/docs/flyctl/deploy/
+          if deploy_to_flyio "$latest_version" "$app_name"; then
+            echo "deployment_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "deployment_status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Step 6: Verify deployment health (conditional - only after successful deployment)
+      # This step only runs after a successful deployment to verify the app is healthy
+      # It checks that at least one machine is in "started" or "running" state
+      # Fly.io's built-in health checks and rollback mechanisms provide additional safety
+      # Health checks documentation: https://fly.io/docs/reference/configuration/#services-http_checks
+      - name: Verify deployment health
+        if: steps.compare.outputs.needs_update == 'true' && steps.deploy.outputs.deployment_status == 'success'
+        run: |
+          source scripts/version-detection.sh
+
+          app_name="${{ steps.current-version.outputs.app_name }}"
+
+          echo "Verifying deployment health..."
+
+          # Wait a few seconds for deployment to stabilize
+          # This allows Fly.io's health checks to complete and machines to start
+          sleep 10
+
+          # Verify that at least one machine is running
+          # Uses: flyctl status --json to query machine states
+          # Checks for machines in "started" or "running" state
+          # Note: Fly.io automatically rolls back failed deployments
+          if verify_deployment_health "$app_name"; then
+            echo "✓ Deployment is healthy"
+          else
+            echo "ERROR: Deployment health check failed"
+            exit 1
+          fi
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Step 7: Create workflow summary
+      # This step always runs (even if previous steps fail) to provide a summary
+      # It reports what action was taken and the version information
+      # The if: always() condition ensures this runs regardless of previous step failures
+      # Workflow summary documentation:
+      # https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#adding-a-job-summary
+      - name: Create workflow summary
+        if: always()
+        run: |
+          source scripts/version-detection.sh
+
+          # Retrieve all relevant information from previous steps
+          current_version="${{ steps.current-version.outputs.current_version }}"
+          latest_version="${{ steps.detect-version.outputs.latest_version }}"
+          needs_update="${{ steps.compare.outputs.needs_update }}"
+          deployment_status="${{ steps.deploy.outputs.deployment_status }}"
+
+          # Determine what action was taken based on the workflow execution
+          # This provides a human-readable summary of the workflow result
+          if [ "$needs_update" = "true" ]; then
+            if [ "$deployment_status" = "success" ]; then
+              action="deployed"
+            elif [ "$deployment_status" = "failed" ]; then
+              action="deployment failed"
+            else
+              action="deployment attempted"
+            fi
+          else
+            action="skipped - already up to date"
+          fi
+
+          # Create and display a formatted summary of the workflow execution
+          # This appears in the GitHub Actions UI for easy monitoring
+          create_workflow_summary "$action" "$current_version" "$latest_version"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
