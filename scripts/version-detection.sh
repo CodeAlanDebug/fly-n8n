@@ -279,12 +279,33 @@ query_flyio_version() {
         return 1
     fi
 
-    # Parse image from JSON output
+    # Parse image from JSON output - try multiple possible locations
+    # Fly.io's JSON structure may vary, so we try different paths
     local image
+
+    # Try primary location: .Image
     image=$(echo "$status_output" | jq -r '.Image // empty' 2>/dev/null)
 
+    # Try machine config location: .Machines[0].config.image
     if [ -z "$image" ]; then
+        image=$(echo "$status_output" | jq -r '.Machines[0]?.config?.image // empty' 2>/dev/null)
+    fi
+
+    # Try alternative machine location: .Machines[0].image_ref
+    if [ -z "$image" ]; then
+        image=$(echo "$status_output" | jq -r '.Machines[0]?.image_ref // empty' 2>/dev/null)
+    fi
+
+    # Try ImageRef field
+    if [ -z "$image" ]; then
+        image=$(echo "$status_output" | jq -r '.ImageRef // empty' 2>/dev/null)
+    fi
+
+    if [ -z "$image" ]; then
+        # Debug: Show available fields to help troubleshoot
         echo "WARNING: No image found in Fly.io status" >&2
+        echo "DEBUG: Available top-level fields:" >&2
+        echo "$status_output" | jq -r 'keys[]' 2>/dev/null | head -10 >&2 || true
         return 0
     fi
 
