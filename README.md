@@ -21,11 +21,11 @@ This repository contains a GitHub Actions workflow that:
 
 ### Configuration Steps
 
-#### 1. Configure Fly.io API Token
+#### 🔑 Step 1: Get Your Fly.io API Token
 
-The workflow requires a Fly.io API token to authenticate and deploy updates.
+The workflow needs a Fly.io API token to authenticate and deploy updates.
 
-**Generate a Fly.io API Token:**
+**Option A: Create a Deploy Token (Recommended)**
 
 ```bash
 # Install flyctl if you haven't already
@@ -34,32 +34,96 @@ The workflow requires a Fly.io API token to authenticate and deploy updates.
 # Authenticate with Fly.io
 flyctl auth login
 
-# Create a new API token
+# Create a new deploy token (more secure, limited permissions)
 flyctl tokens create deploy
 ```
 
-**Add the token to GitHub Secrets:**
+**Option B: Use Your Personal Token**
 
-1. Go to your GitHub repository
-2. Navigate to **Settings** → **Secrets and variables** → **Actions**
-3. Click **New repository secret**
-4. Name: `FLY_API_TOKEN`
-5. Value: Paste the token from the previous step
-6. Click **Add secret**
-
-#### 2. Verify fly.toml Configuration
-
-Ensure your `fly.toml` file is properly configured with your app name:
-
-```toml
-app = 'your-app-name'
+```bash
+# Get your personal access token
+flyctl auth token
 ```
 
-The workflow will automatically detect your app name from this file.
+> 💡 **Tip**: The deploy token is more secure as it has limited permissions.
 
-#### 3. Enable the Workflow
+After running the command, you'll see output like:
 
-The workflow is configured to run automatically. No additional setup is needed once the `FLY_API_TOKEN` secret is configured.
+```
+FlyV1 fm2_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+📋 **Copy this token** - you'll need it in the next step!
+
+---
+
+#### 🔐 Step 2: Add Token to GitHub Secrets
+
+Now let's securely store the token in your GitHub repository:
+
+1. **Navigate to your repository on GitHub**
+
+   - Go to `https://github.com/YOUR_USERNAME/YOUR_REPO`
+
+2. **Open Settings**
+
+   - Click the **⚙️ Settings** tab at the top of your repository
+
+3. **Go to Secrets**
+
+   - In the left sidebar, click **Secrets and variables** → **Actions**
+
+4. **Create New Secret**
+
+   - Click the green **New repository secret** button
+
+5. **Configure the Secret**
+
+   ```
+   Name:  FLY_API_TOKEN
+   Value: [Paste your token from Step 1]
+   ```
+
+   ⚠️ **Important**: The name must be exactly `FLY_API_TOKEN` (case-sensitive)
+
+6. **Save**
+   - Click **Add secret**
+
+✅ **Done!** Your token is now securely stored and will be masked in all logs.
+
+---
+
+#### ✅ Step 3: Verify fly.toml Configuration
+
+Make sure your `fly.toml` file has your app name configured:
+
+```toml
+app = 'n8n-run'  # ← Your Fly.io app name
+primary_region = 'ams'
+
+[build]
+  image = 'n8nio/n8n'
+# ... rest of your config
+```
+
+The workflow will automatically read your app name from this file.
+
+> 💡 **Find your app name**: Run `flyctl apps list` to see all your Fly.io apps
+
+---
+
+#### 🎉 Step 4: You're All Set!
+
+The workflow is now configured and will run automatically. No additional setup needed!
+
+**What happens next:**
+
+- ⏰ The workflow runs **daily at 2:00 AM UTC** to check for updates
+- 🔍 It compares the latest n8n version with your deployed version
+- 🚀 If a new stable version is found, it automatically deploys
+- 📊 You can view all activity in the **Actions** tab
+
+**Want to test it now?** See the [Manual Trigger](#manual) section below.
 
 ## Workflow Triggers
 
@@ -85,52 +149,130 @@ Cron syntax examples:
 
 You can manually trigger the workflow at any time:
 
-1. Go to your GitHub repository
-2. Navigate to **Actions** tab
-3. Select **Deploy n8n to Fly.io** workflow
-4. Click **Run workflow**
-5. Click the green **Run workflow** button
+1. 🏠 **Go to your GitHub repository**
+
+   - Navigate to `https://github.com/YOUR_USERNAME/YOUR_REPO`
+
+2. 🎬 **Open the Actions tab**
+
+   - Click the **Actions** tab at the top
+
+3. 📋 **Select the workflow**
+
+   - In the left sidebar, click **Deploy n8n to Fly.io**
+
+4. ▶️ **Run the workflow**
+
+   - Click the **Run workflow** dropdown button (top right)
+   - Select the branch (usually `main`)
+   - Click the green **Run workflow** button
+
+5. 👀 **Watch it run**
+   - The workflow will appear in the list below
+   - Click on it to see real-time logs
+
+> ⚡ **Quick tip**: This is useful for testing your setup or forcing an immediate update check!
 
 ## How It Works
 
-1. **Version Detection**: Queries Docker Hub API for the latest stable n8n version
+```
+┌─────────────────────────────────────────────────────────────┐
+│  🕐 Scheduled Trigger (Daily at 2 AM UTC)                   │
+│     or Manual Trigger                                        │
+└────────────────────┬────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│  🔍 Step 1: Check Docker Hub                                │
+│  • Query Docker Hub API for n8n tags                        │
+│  • Filter out pre-releases (beta, alpha, rc)                │
+│  • Find latest stable version (e.g., 1.23.4)                │
+└────────────────────┬────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│  📊 Step 2: Compare Versions                                │
+│  • Get current version from Fly.io                          │
+│  • Compare using semantic versioning                        │
+│  • Decide: Update needed?                                   │
+└────────────────────┬────────────────────────────────────────┘
+                     │
+         ┌───────────┴───────────┐
+         │                       │
+         ▼                       ▼
+    ✅ Up to date          🆕 New version
+         │                       │
+         ▼                       ▼
+    Skip deploy           ┌─────────────────────────────────┐
+         │                │  🚀 Step 3: Deploy              │
+         │                │  • Deploy new Docker image      │
+         │                │  • Preserve fly.toml config     │
+         │                │  • Keep data volume intact      │
+         │                │  • Run health checks            │
+         │                └──────────┬──────────────────────┘
+         │                           │
+         └───────────┬───────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│  📝 Step 4: Report Results                                  │
+│  • Log version information                                  │
+│  • Create workflow summary                                  │
+│  • Show success/failure status                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Detailed Steps
+
+1. **🔍 Version Detection**: Queries Docker Hub API for the latest stable n8n version
 
    - Filters out pre-release versions (beta, alpha, rc)
    - Uses semantic versioning to identify the latest stable release
 
-2. **Version Comparison**: Checks your currently deployed version on Fly.io
+2. **📊 Version Comparison**: Checks your currently deployed version on Fly.io
 
    - Compares using semantic versioning rules
    - Determines if an update is needed
 
-3. **Deployment**: If a new version is available
+3. **🚀 Deployment**: If a new version is available
 
    - Deploys the new Docker image to Fly.io
    - Preserves your existing `fly.toml` configuration
    - Maintains your data volume (no data loss)
    - Verifies deployment health after completion
 
-4. **Reporting**: Logs all actions and creates a workflow summary
-   - Success: Reports the deployed version
-   - No update: Confirms you're already up to date
-   - Failure: Provides detailed error information
+4. **📝 Reporting**: Logs all actions and creates a workflow summary
+   - ✅ Success: Reports the deployed version
+   - ⏭️ No update: Confirms you're already up to date
+   - ❌ Failure: Provides detailed error information
 
-## Monitoring
+## 📊 Monitoring
 
 ### View Workflow Runs
 
-1. Go to your GitHub repository
-2. Navigate to **Actions** tab
-3. Click on **Deploy n8n to Fly.io** workflow
-4. View individual workflow runs and their logs
+1. 🏠 **Go to your GitHub repository**
+2. 🎬 **Navigate to Actions tab**
+3. 📋 **Click on "Deploy n8n to Fly.io" workflow**
+4. 👀 **View individual workflow runs and their logs**
 
 ### Workflow Summary
 
 Each workflow run provides a summary showing:
 
-- Current deployed version
-- Latest available version
-- Action taken (deployed, skipped, or failed)
+| Status     | Icon | Description                       |
+| ---------- | ---- | --------------------------------- |
+| ✅ Success | 🚀   | New version deployed successfully |
+| ⏭️ Skipped | ✓    | Already running latest version    |
+| ❌ Failed  | ⚠️   | Deployment encountered an error   |
+
+**Example Summary:**
+
+```
+📦 Current Version: 1.22.5
+🆕 Latest Version:  1.23.4
+🚀 Action: Deployed new version
+✅ Status: Success
+```
 
 ## Troubleshooting
 
