@@ -3,6 +3,13 @@ name: Deploy n8n to Fly.io
 # Workflow triggers
 # Documentation: https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows
 "on":
+  # Run on pushes to the main branch
+  # This triggers automatic deployment when changes are pushed
+  # Documentation: https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#push
+  push:
+    branches:
+      - main
+
   # Run daily at 2 AM UTC to check for new versions
   # Cron syntax: minute hour day month day-of-week
   # Documentation: https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#schedule
