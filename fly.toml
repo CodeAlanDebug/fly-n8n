@@ -1,0 +1,27 @@
+# fly.toml app configuration file generated for n8n-run on 2025-06-23T17:20:53+02:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'n8n-run'
+primary_region = 'ams'
+
+[build]
+  image = 'n8nio/n8n'
+
+[http_service]
+  internal_port = 5678
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+
+[[mounts]]
+  source = 'n8n_data'
+  destination = '/home/node/.n8n'
