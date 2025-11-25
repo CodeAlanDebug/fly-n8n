@@ -426,53 +426,33 @@ fetch_release_notes() {
     return 0
 }
 
-# Get all versions between two versions (exclusive of current, inclusive of latest)
-# Args: $1 - current version, $2 - latest version
-# Returns: List of versions between (one per line), newest first
-get_versions_between() {
-    local current_version="$1"
-    local latest_version="$2"
-    local versions=""
+# Get release notes directly from GitHub for a version
+# This is a simpler approach that just fetches the release notes for the target version
+# without needing to query Docker Hub again
+# Args: $1 - version tag (e.g., 1.70.0)
+# Returns: Formatted release notes or error message
+get_release_notes_safe() {
+    local version="$1"
+    local notes
 
-    # Query Docker Hub for all versions
-    local response
-    response=$(query_dockerhub_tags)
-    if [ $? -ne 0 ]; then
+    notes=$(fetch_release_notes "$version")
+
+    if [ -z "$notes" ]; then
+        echo "Release notes not available for version ${version}"
         return 1
     fi
 
-    # Get all stable versions and filter those between current and latest
-    local all_versions
-    all_versions=$(extract_tag_names "$response" | filter_stable_versions)
-
-    # Filter versions that are > current and <= latest
-    while IFS= read -r version; do
-        [ -z "$version" ] && continue
-
-        # Skip if version equals current
-        if [ "$version" = "$current_version" ]; then
-            continue
-        fi
-
-        # Include if version is between current and latest (inclusive of latest)
-        if [ -z "$current_version" ]; then
-            # No current version means initial deployment - only show latest
-            if [ "$version" = "$latest_version" ]; then
-                echo "$version"
-            fi
-        elif version_greater_than "$version" "$current_version"; then
-            if [ "$version" = "$latest_version" ] || ! version_greater_than "$version" "$latest_version"; then
-                echo "$version"
-            fi
-        fi
-    done <<< "$all_versions" | sort -t. -k1,1nr -k2,2nr -k3,3nr
+    echo "$notes"
+    return 0
 }
 
 # Format release notes into a concise summary
-# Args: $1 - raw release notes content
+# Input: raw release notes via stdin
 # Returns: Formatted summary with key highlights
 format_release_summary() {
-    local notes="$1"
+    # Read from stdin
+    local notes
+    notes=$(cat)
 
     if [ -z "$notes" ]; then
         echo "No release notes available"
@@ -487,57 +467,37 @@ format_release_summary() {
         head -50
 }
 
-# Fetch changelog summary for versions between current and latest
+# Fetch changelog summary for the target version only
+# This simplified version only fetches notes for the version being deployed
 # Args: $1 - current version, $2 - latest version
 # Returns: Formatted changelog summary
 fetch_changelog_summary() {
     local current_version="$1"
     local latest_version="$2"
-    local summary=""
-    local versions_checked=0
-    local max_versions=5  # Limit to avoid too long output
 
-    echo "🔍 Fetching release notes..." >&2
+    echo "🔍 Fetching release notes for v${latest_version}..." >&2
 
-    # Get versions between current and latest
-    local versions
-    versions=$(get_versions_between "$current_version" "$latest_version")
+    # Fetch release notes for the target version
+    local notes
+    notes=$(fetch_release_notes "$latest_version")
 
-    if [ -z "$versions" ]; then
-        echo "No intermediate versions found"
+    if [ -z "$notes" ]; then
+        echo "📝 Release notes not available for version ${latest_version}."
+        echo ""
+        echo "View all releases: https://github.com/n8n-io/n8n/releases"
         return
     fi
 
-    # Fetch release notes for each version (limited)
-    while IFS= read -r version; do
-        [ -z "$version" ] && continue
+    # Format and output the release notes
+    local formatted
+    formatted=$(echo "$notes" | format_release_summary)
 
-        if [ $versions_checked -ge $max_versions ]; then
-            summary="${summary}
----
-📋 *...and more versions. See [full changelog](https://github.com/n8n-io/n8n/releases)*"
-            break
-        fi
-
-        echo "  → Fetching notes for v${version}..." >&2
-        local notes
-        notes=$(fetch_release_notes "$version")
-
-        if [ -n "$notes" ]; then
-            # Extract just the highlights (first meaningful section)
-            local highlights
-            highlights=$(echo "$notes" | format_release_summary)
-
-            summary="${summary}
-### 🏷️ Version ${version}
-
-${highlights}
-"
-            versions_checked=$((versions_checked + 1))
-        fi
-    done <<< "$versions"
-
-    echo "$summary"
+    echo "### 🏷️ Version ${latest_version}"
+    echo ""
+    echo "$formatted"
+    echo ""
+    echo "---"
+    echo "📋 *For older versions, see [full changelog](https://github.com/n8n-io/n8n/releases)*"
 }
 
 # Create a nicely formatted version update summary for GitHub Actions

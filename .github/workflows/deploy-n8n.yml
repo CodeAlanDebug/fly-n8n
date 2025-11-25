@@ -236,17 +236,35 @@ jobs:
       # Step 5: Fetch version update summary (conditional - only if update is needed)
       # This step fetches release notes from GitHub to show what's new in the update
       # It creates a nicely formatted summary of changes between versions
+      # continue-on-error ensures this step won't break deployment if it fails
       # GitHub API documentation: https://docs.github.com/en/rest/releases/releases
       - name: 📝 Fetch version update summary
         if: steps.compare.outputs.needs_update == 'true'
+        continue-on-error: true
         run: |
           source scripts/version-detection.sh
 
           current_version="${{ steps.current-version.outputs.current_version }}"
           latest_version="${{ steps.detect-version.outputs.latest_version }}"
 
-          # Create version summary with release notes
-          create_version_summary "$current_version" "$latest_version"
+          # Test that release notes fetch works before creating summary
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🧪 Testing GitHub API connection..."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          if notes=$(fetch_release_notes "$latest_version"); then
+            if [ -n "$notes" ]; then
+              echo "✅ Successfully fetched release notes for v${latest_version}"
+              # Create version summary with release notes
+              create_version_summary "$current_version" "$latest_version"
+            else
+              echo "⚠️ No release notes found for v${latest_version}"
+              echo "   This is non-critical - deployment will continue"
+            fi
+          else
+            echo "⚠️ Could not fetch release notes (GitHub API may be unavailable)"
+            echo "   This is non-critical - deployment will continue"
+          fi
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
