@@ -402,6 +402,205 @@ deploy_to_flyio() {
     return 0
 }
 
+# Fetch release notes from GitHub API for a specific version
+# Args: $1 - version tag (e.g., 1.70.0)
+# Returns: Release notes content or empty string if not found
+fetch_release_notes() {
+    local version="$1"
+    local api_url="https://api.github.com/repos/n8n-io/n8n/releases/tags/n8n@${version}"
+    local response
+    local http_code
+
+    # Make API request
+    response=$(curl -s -w "\n%{http_code}" "$api_url" 2>&1)
+    http_code=$(echo "$response" | tail -n1)
+    response=$(echo "$response" | sed '$d')
+
+    # Check HTTP status code
+    if [ "$http_code" != "200" ]; then
+        return 1
+    fi
+
+    # Extract release body (release notes)
+    echo "$response" | jq -r '.body // empty' 2>/dev/null
+    return 0
+}
+
+# Get all versions between two versions (exclusive of current, inclusive of latest)
+# Args: $1 - current version, $2 - latest version
+# Returns: List of versions between (one per line), newest first
+get_versions_between() {
+    local current_version="$1"
+    local latest_version="$2"
+    local versions=""
+
+    # Query Docker Hub for all versions
+    local response
+    response=$(query_dockerhub_tags)
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+
+    # Get all stable versions and filter those between current and latest
+    local all_versions
+    all_versions=$(extract_tag_names "$response" | filter_stable_versions)
+
+    # Filter versions that are > current and <= latest
+    while IFS= read -r version; do
+        [ -z "$version" ] && continue
+
+        # Skip if version equals current
+        if [ "$version" = "$current_version" ]; then
+            continue
+        fi
+
+        # Include if version is between current and latest (inclusive of latest)
+        if [ -z "$current_version" ]; then
+            # No current version means initial deployment - only show latest
+            if [ "$version" = "$latest_version" ]; then
+                echo "$version"
+            fi
+        elif version_greater_than "$version" "$current_version"; then
+            if [ "$version" = "$latest_version" ] || ! version_greater_than "$version" "$latest_version"; then
+                echo "$version"
+            fi
+        fi
+    done <<< "$all_versions" | sort -t. -k1,1nr -k2,2nr -k3,3nr
+}
+
+# Format release notes into a concise summary
+# Args: $1 - raw release notes content
+# Returns: Formatted summary with key highlights
+format_release_summary() {
+    local notes="$1"
+
+    if [ -z "$notes" ]; then
+        echo "No release notes available"
+        return
+    fi
+
+    # Extract key sections and format nicely
+    # Remove HTML comments, clean up markdown
+    echo "$notes" | \
+        sed 's/<!--.*-->//g' | \
+        sed 's/\r//g' | \
+        head -50
+}
+
+# Fetch changelog summary for versions between current and latest
+# Args: $1 - current version, $2 - latest version
+# Returns: Formatted changelog summary
+fetch_changelog_summary() {
+    local current_version="$1"
+    local latest_version="$2"
+    local summary=""
+    local versions_checked=0
+    local max_versions=5  # Limit to avoid too long output
+
+    echo "🔍 Fetching release notes..." >&2
+
+    # Get versions between current and latest
+    local versions
+    versions=$(get_versions_between "$current_version" "$latest_version")
+
+    if [ -z "$versions" ]; then
+        echo "No intermediate versions found"
+        return
+    fi
+
+    # Fetch release notes for each version (limited)
+    while IFS= read -r version; do
+        [ -z "$version" ] && continue
+
+        if [ $versions_checked -ge $max_versions ]; then
+            summary="${summary}
+---
+📋 *...and more versions. See [full changelog](https://github.com/n8n-io/n8n/releases)*"
+            break
+        fi
+
+        echo "  → Fetching notes for v${version}..." >&2
+        local notes
+        notes=$(fetch_release_notes "$version")
+
+        if [ -n "$notes" ]; then
+            # Extract just the highlights (first meaningful section)
+            local highlights
+            highlights=$(echo "$notes" | format_release_summary)
+
+            summary="${summary}
+### 🏷️ Version ${version}
+
+${highlights}
+"
+            versions_checked=$((versions_checked + 1))
+        fi
+    done <<< "$versions"
+
+    echo "$summary"
+}
+
+# Create a nicely formatted version update summary for GitHub Actions
+# Args: $1 - current version, $2 - latest version
+# Outputs: Markdown formatted summary to GITHUB_STEP_SUMMARY
+create_version_summary() {
+    local current_version="$1"
+    local latest_version="$2"
+
+    if [ -z "$latest_version" ]; then
+        return
+    fi
+
+    echo "" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "           📝 Fetching Version Update Summary                      " >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+
+    # Fetch the changelog
+    local changelog
+    changelog=$(fetch_changelog_summary "$current_version" "$latest_version")
+
+    # Output to GitHub Actions summary if available
+    if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+        {
+            echo ""
+            echo "## 📝 What's New"
+            echo ""
+            if [ -z "$current_version" ]; then
+                echo "> 🎉 **Initial deployment** to version **${latest_version}**"
+            else
+                echo "> 📦 Upgrading from **${current_version}** → **${latest_version}**"
+            fi
+            echo ""
+            echo "<details>"
+            echo "<summary>📋 Click to view release notes</summary>"
+            echo ""
+            echo "$changelog"
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "---"
+            echo ""
+            echo "🔗 **Useful Links:**"
+            echo "- [n8n Releases](https://github.com/n8n-io/n8n/releases)"
+            echo "- [n8n Changelog](https://docs.n8n.io/reference/release-notes/)"
+            echo "- [n8n Documentation](https://docs.n8n.io/)"
+            echo ""
+        } >> "$GITHUB_STEP_SUMMARY"
+    fi
+
+    # Also output to console
+    echo "" >&2
+    echo "📝 Version Update Summary:" >&2
+    if [ -z "$current_version" ]; then
+        echo "   🎉 Initial deployment to version ${latest_version}" >&2
+    else
+        echo "   📦 ${current_version} → ${latest_version}" >&2
+    fi
+    echo "" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+}
+
 # Verify deployment health after deployment
 # Args: $1 - app name
 # Returns: 0 if healthy, non-zero if unhealthy

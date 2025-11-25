@@ -233,7 +233,24 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      # Step 5: Deploy new version (conditional - only if update is needed)
+      # Step 5: Fetch version update summary (conditional - only if update is needed)
+      # This step fetches release notes from GitHub to show what's new in the update
+      # It creates a nicely formatted summary of changes between versions
+      # GitHub API documentation: https://docs.github.com/en/rest/releases/releases
+      - name: 📝 Fetch version update summary
+        if: steps.compare.outputs.needs_update == 'true'
+        run: |
+          source scripts/version-detection.sh
+
+          current_version="${{ steps.current-version.outputs.current_version }}"
+          latest_version="${{ steps.detect-version.outputs.latest_version }}"
+
+          # Create version summary with release notes
+          create_version_summary "$current_version" "$latest_version"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Step 6: Deploy new version (conditional - only if update is needed)
       # This step only runs if the comparison determined an update is needed
       # It uses flyctl to deploy the new Docker image while preserving all configuration
       # The --image flag ensures only the image is updated, not volumes or other settings
@@ -278,7 +295,7 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      # Step 6: Verify deployment health (conditional - only after successful deployment)
+      # Step 7: Verify deployment health (conditional - only after successful deployment)
       # This step only runs after a successful deployment to verify the app is healthy
       # It checks that at least one machine is in "started" or "running" state
       # Fly.io's built-in health checks and rollback mechanisms provide additional safety
@@ -318,7 +335,7 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      # Step 7: Create workflow summary
+      # Step 8: Create workflow summary
       # This step always runs (even if previous steps fail) to provide a summary
       # It reports what action was taken and the version information
       # The if: always() condition ensures this runs regardless of previous step failures
