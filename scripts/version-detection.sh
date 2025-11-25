@@ -413,7 +413,7 @@ fetch_release_notes() {
     local curl_error
 
     # Make API request - capture stderr separately for error logging
-    curl_error=$(mktemp)
+    curl_error=$(mktemp -t curl_error.XXXXXX)
     response=$(curl -s -w "\n%{http_code}" "$api_url" 2>"$curl_error")
     local curl_exit_code=$?
 
@@ -445,7 +445,7 @@ fetch_release_notes() {
 
     # Extract release body (release notes) - log jq errors for debugging
     local jq_error
-    jq_error=$(mktemp)
+    jq_error=$(mktemp -t jq_error.XXXXXX)
     local body
     body=$(echo "$response" | jq -r '.body // empty' 2>"$jq_error")
 
@@ -492,11 +492,11 @@ format_release_summary() {
     fi
 
     # Extract key sections and format nicely
-    # Remove HTML comments, clean up markdown
-    # Limit to 50 lines to keep the GitHub Actions summary readable
+    # Remove HTML comments (using non-greedy match to handle multiple comments per line)
+    # Clean up markdown and limit to 50 lines to keep the GitHub Actions summary readable
     # (n8n release notes are typically 20-100+ lines, 50 captures key changes)
     echo "$notes" | \
-        sed 's/<!--.*-->//g' | \
+        perl -pe 's/<!--.*?-->//g' | \
         sed 's/\r//g' | \
         head -50
 }
