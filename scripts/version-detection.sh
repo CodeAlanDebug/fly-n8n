@@ -410,19 +410,51 @@ fetch_release_notes() {
     local api_url="https://api.github.com/repos/n8n-io/n8n/releases/tags/n8n@${version}"
     local response
     local http_code
+    local curl_error
 
-    # Make API request
-    response=$(curl -s -w "\n%{http_code}" "$api_url" 2>&1)
+    # Make API request - capture stderr separately for error logging
+    curl_error=$(mktemp)
+    response=$(curl -s -w "\n%{http_code}" "$api_url" 2>"$curl_error")
+    local curl_exit_code=$?
+
+    # Log curl errors if any occurred
+    if [ $curl_exit_code -ne 0 ]; then
+        echo "ERROR: curl failed with exit code $curl_exit_code" >&2
+        if [ -s "$curl_error" ]; then
+            echo "curl error: $(cat "$curl_error")" >&2
+        fi
+        rm -f "$curl_error"
+        return 1
+    fi
+    rm -f "$curl_error"
+
     http_code=$(echo "$response" | tail -n1)
     response=$(echo "$response" | sed '$d')
 
     # Check HTTP status code
     if [ "$http_code" != "200" ]; then
+        echo "WARNING: GitHub API returned HTTP $http_code for version $version" >&2
         return 1
     fi
 
-    # Extract release body (release notes)
-    echo "$response" | jq -r '.body // empty' 2>/dev/null
+    # Check if jq is available
+    if ! command -v jq &> /dev/null; then
+        echo "ERROR: jq is required but not installed" >&2
+        return 1
+    fi
+
+    # Extract release body (release notes) - log jq errors for debugging
+    local jq_error
+    jq_error=$(mktemp)
+    local body
+    body=$(echo "$response" | jq -r '.body // empty' 2>"$jq_error")
+
+    if [ -s "$jq_error" ]; then
+        echo "WARNING: jq parsing issue: $(cat "$jq_error")" >&2
+    fi
+    rm -f "$jq_error"
+
+    echo "$body"
     return 0
 }
 
@@ -461,6 +493,8 @@ format_release_summary() {
 
     # Extract key sections and format nicely
     # Remove HTML comments, clean up markdown
+    # Limit to 50 lines to keep the GitHub Actions summary readable
+    # (n8n release notes are typically 20-100+ lines, 50 captures key changes)
     echo "$notes" | \
         sed 's/<!--.*-->//g' | \
         sed 's/\r//g' | \
