@@ -222,11 +222,21 @@ jobs:
             echo "🚀 Decision: UPDATE NEEDED"
             echo "   → Will deploy version $latest_version"
             echo "needs_update=true" >> $GITHUB_OUTPUT
+
+            # Check for major version upgrade and log warning with breaking changes
+            if [ -n "$current_version" ] && is_major_upgrade "$current_version" "$latest_version"; then
+              log_major_upgrade_warning "$current_version" "$latest_version"
+              echo "is_major_upgrade=true" >> $GITHUB_OUTPUT
+            else
+              echo "is_major_upgrade=false" >> $GITHUB_OUTPUT
+            fi
+
             log_version_check "$current_version" "$latest_version" "update needed"
           else
             echo "✅ Decision: ALREADY UP TO DATE"
             echo "   → No deployment needed"
             echo "needs_update=false" >> $GITHUB_OUTPUT
+            echo "is_major_upgrade=false" >> $GITHUB_OUTPUT
             log_version_check "$current_version" "$latest_version" "no update needed"
           fi
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

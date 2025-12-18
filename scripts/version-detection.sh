@@ -209,6 +209,81 @@ version_greater_than() {
     fi
 }
 
+# Check if upgrade is a major version change
+# Args: $1 - current version, $2 - new version
+# Returns: 0 if major version changed, 1 otherwise
+is_major_upgrade() {
+    local current="$1"
+    local new="$2"
+
+    if [ -z "$current" ] || [ -z "$new" ]; then
+        return 1
+    fi
+
+    local current_major="${current%%.*}"
+    local new_major="${new%%.*}"
+
+    if [ "$new_major" -gt "$current_major" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# Log major version upgrade warning with breaking changes info
+# Args: $1 - current version, $2 - new version
+log_major_upgrade_warning() {
+    local current="$1"
+    local new="$2"
+    local current_major="${current%%.*}"
+    local new_major="${new%%.*}"
+
+    echo "" >&2
+    echo "⚠️  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "⚠️  MAJOR VERSION UPGRADE DETECTED: v${current_major}.x → v${new_major}.x" >&2
+    echo "⚠️  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "" >&2
+
+    # Provide version-specific guidance
+    if [ "$new_major" = "2" ]; then
+        echo "📋 n8n 2.0 Breaking Changes:" >&2
+        echo "   • Task runners enabled by default (Code nodes run in isolation)" >&2
+        echo "   • Environment variable access blocked in Code nodes by default" >&2
+        echo "   • Start node deprecated - use Manual Trigger instead" >&2
+        echo "   • MySQL/MariaDB no longer supported - migrate to PostgreSQL" >&2
+        echo "   • ExecuteCommand and LocalFileTrigger nodes disabled by default" >&2
+        echo "" >&2
+        echo "📖 Migration Guide: https://docs.n8n.io/2-0-breaking-changes/" >&2
+        echo "🔧 Migration Tool: Settings → Migration Report (in n8n UI)" >&2
+    fi
+
+    echo "" >&2
+    echo "⚠️  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "" >&2
+
+    # Also write to GitHub Actions summary if available
+    if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+        {
+            echo ""
+            echo "## ⚠️ Major Version Upgrade: v${current_major}.x → v${new_major}.x"
+            echo ""
+            if [ "$new_major" = "2" ]; then
+                echo "### n8n 2.0 Breaking Changes"
+                echo ""
+                echo "| Change | Impact |"
+                echo "|--------|--------|"
+                echo "| Task runners enabled | Code nodes run in isolated environments |"
+                echo "| Env vars blocked in Code | Set \`N8N_BLOCK_ENV_ACCESS_IN_NODE=false\` to allow |"
+                echo "| Start node deprecated | Replace with Manual Trigger node |"
+                echo "| MySQL/MariaDB dropped | Migrate to PostgreSQL before upgrading |"
+                echo "| Security nodes disabled | ExecuteCommand, LocalFileTrigger off by default |"
+                echo ""
+                echo "📖 **[Migration Guide](https://docs.n8n.io/2-0-breaking-changes/)**"
+                echo ""
+            fi
+        } >> "$GITHUB_STEP_SUMMARY"
+    fi
+}
+
 # Find the latest semantic version from a list
 # Args: Version strings via stdin, one per line
 # Returns: The highest semantic version

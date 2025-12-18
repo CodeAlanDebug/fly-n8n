@@ -3303,3 +3303,184 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" =~ "Workflow executed" ]]
 }
+
+# ============================================================================
+# MAJOR VERSION UPGRADE DETECTION TESTS
+# Tests for n8n 2.0 compatibility and major version upgrade warnings
+# ============================================================================
+
+@test "is_major_upgrade - detects 1.x to 2.x upgrade" {
+    run bash -c '
+        source scripts/version-detection.sh
+        is_major_upgrade "1.70.0" "2.0.0" && echo "is_major" || echo "not_major"
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "is_major" ]]
+}
+
+@test "is_major_upgrade - detects 0.x to 1.x upgrade" {
+    run bash -c '
+        source scripts/version-detection.sh
+        is_major_upgrade "0.234.0" "1.0.0" && echo "is_major" || echo "not_major"
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "is_major" ]]
+}
+
+@test "is_major_upgrade - minor version change is not major" {
+    run bash -c '
+        source scripts/version-detection.sh
+        is_major_upgrade "1.70.0" "1.80.0" && echo "is_major" || echo "not_major"
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "not_major" ]]
+}
+
+@test "is_major_upgrade - patch version change is not major" {
+    run bash -c '
+        source scripts/version-detection.sh
+        is_major_upgrade "2.0.0" "2.0.5" && echo "is_major" || echo "not_major"
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "not_major" ]]
+}
+
+@test "is_major_upgrade - downgrade is not major upgrade" {
+    run bash -c '
+        source scripts/version-detection.sh
+        is_major_upgrade "2.0.0" "1.70.0" && echo "is_major" || echo "not_major"
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "not_major" ]]
+}
+
+@test "is_major_upgrade - empty current version returns false" {
+    run bash -c '
+        source scripts/version-detection.sh
+        is_major_upgrade "" "2.0.0" && echo "is_major" || echo "not_major"
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "not_major" ]]
+}
+
+@test "is_major_upgrade - empty new version returns false" {
+    run bash -c '
+        source scripts/version-detection.sh
+        is_major_upgrade "1.70.0" "" && echo "is_major" || echo "not_major"
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "not_major" ]]
+}
+
+@test "is_major_upgrade - property test with 100 version pairs" {
+    run bash -c '
+        source scripts/version-detection.sh
+
+        for i in {1..100}; do
+            # Generate random major versions
+            old_major=$((RANDOM % 5))
+            new_major=$((RANDOM % 5 + 1))
+
+            # Generate random minor and patch
+            old_minor=$((RANDOM % 100))
+            new_minor=$((RANDOM % 100))
+            old_patch=$((RANDOM % 50))
+            new_patch=$((RANDOM % 50))
+
+            old_version="${old_major}.${old_minor}.${old_patch}"
+            new_version="${new_major}.${new_minor}.${new_patch}"
+
+            if is_major_upgrade "$old_version" "$new_version"; then
+                result="major"
+            else
+                result="not_major"
+            fi
+
+            # Verify correctness
+            if [ "$new_major" -gt "$old_major" ]; then
+                if [ "$result" != "major" ]; then
+                    echo "Test $i FAILED: $old_version -> $new_version should be major upgrade"
+                    exit 1
+                fi
+            else
+                if [ "$result" = "major" ]; then
+                    echo "Test $i FAILED: $old_version -> $new_version should NOT be major upgrade"
+                    exit 1
+                fi
+            fi
+        done
+        echo "All 100 property tests passed"
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "All 100 property tests passed" ]]
+}
+
+@test "log_major_upgrade_warning - outputs n8n 2.0 specific warnings" {
+    run bash -c '
+        source scripts/version-detection.sh
+        log_major_upgrade_warning "1.70.0" "2.0.0" 2>&1
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "MAJOR VERSION UPGRADE DETECTED" ]]
+    [[ "$output" =~ "v1.x → v2.x" ]]
+    [[ "$output" =~ "Task runners enabled" ]]
+    [[ "$output" =~ "Start node deprecated" ]]
+    [[ "$output" =~ "MySQL/MariaDB" ]]
+    [[ "$output" =~ "Migration Guide" ]]
+}
+
+@test "log_major_upgrade_warning - writes to GitHub step summary when available" {
+    run bash -c '
+        source scripts/version-detection.sh
+
+        # Create temp file for GitHub step summary
+        export GITHUB_STEP_SUMMARY=$(mktemp)
+
+        log_major_upgrade_warning "1.70.0" "2.0.0" 2>&1
+
+        # Check the summary was written
+        if grep -q "Major Version Upgrade" "$GITHUB_STEP_SUMMARY"; then
+            echo "Summary written correctly"
+        else
+            echo "Summary not written"
+            cat "$GITHUB_STEP_SUMMARY"
+            exit 1
+        fi
+
+        rm -f "$GITHUB_STEP_SUMMARY"
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "Summary written correctly" ]]
+}
+
+@test "Major upgrade detection integrated with needs_update" {
+    run bash -c '
+        source scripts/version-detection.sh
+
+        current="1.123.0"
+        latest="2.0.0"
+
+        # Both should detect update needed AND major upgrade
+        if needs_update "$current" "$latest"; then
+            echo "Update needed: yes"
+        fi
+
+        if is_major_upgrade "$current" "$latest"; then
+            echo "Major upgrade: yes"
+        fi
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "Update needed: yes" ]]
+    [[ "$output" =~ "Major upgrade: yes" ]]
+}

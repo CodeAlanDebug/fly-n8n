@@ -341,6 +341,62 @@ Each workflow run provides a summary showing:
 3. Verify the cron syntax is correct
 4. Note: GitHub Actions may delay scheduled workflows during high load periods
 
+## n8n 2.0 Compatibility
+
+This deployment is fully compatible with n8n 2.x. The configuration includes all necessary environment variables and settings for n8n 2.0.
+
+### n8n 2.0 Breaking Changes
+
+When upgrading from n8n 1.x to 2.x, be aware of these breaking changes:
+
+| Change | Impact | Action Required |
+|--------|--------|-----------------|
+| **Task Runners** | Code nodes now run in isolated environments | Enabled by default in `fly.toml` |
+| **Env Vars in Code** | Environment variables blocked in Code nodes by default | Set `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` if needed |
+| **Start Node** | Deprecated and will not work | Replace with Manual Trigger node |
+| **MySQL/MariaDB** | No longer supported | Migrate to PostgreSQL before upgrading |
+| **Security Nodes** | ExecuteCommand and LocalFileTrigger disabled by default | Explicitly excluded in `fly.toml` |
+| **Python Code** | Requires external task runners | Use `n8nio/runners` image for external mode |
+
+### Pre-Upgrade Checklist
+
+Before the auto-deployment upgrades you to n8n 2.x:
+
+1. **Use the Migration Tool**: In your n8n instance, go to **Settings → Migration Report** to identify issues
+2. **Replace Start Nodes**: Update workflows using the Start node to use Manual Trigger instead
+3. **Check Code Nodes**: If your Code nodes access environment variables, you'll need to update the configuration
+4. **Database**: If using MySQL/MariaDB, migrate to PostgreSQL first
+
+### Configuration Details
+
+The `fly.toml` includes these n8n 2.0 specific settings:
+
+```toml
+[env]
+  # Task runners (enabled by default in 2.0)
+  N8N_RUNNERS_ENABLED = "true"
+  N8N_RUNNERS_MODE = "internal"
+
+  # Environment variable access in Code nodes
+  N8N_BLOCK_ENV_ACCESS_IN_NODE = "true"  # Set to "false" if needed
+
+  # Security: Disabled risky nodes
+  N8N_NODES_EXCLUDE = "[\"n8n-nodes-base.executeCommand\",\"n8n-nodes-base.localFileTrigger\"]"
+```
+
+### Memory Requirements
+
+n8n 2.0 with task runners requires more memory. The configuration has been updated:
+
+- **Previous**: 1GB RAM
+- **Current**: 2GB RAM (for task runner overhead)
+
+### Resources
+
+- [n8n 2.0 Breaking Changes](https://docs.n8n.io/2-0-breaking-changes/)
+- [Migration Tool Documentation](https://docs.n8n.io/migration-tool-v2/)
+- [n8n 2.0 Announcement](https://blog.n8n.io/introducing-n8n-2-0/)
+
 ## Configuration Preservation
 
 The workflow is designed to preserve your existing configuration:

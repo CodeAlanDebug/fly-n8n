@@ -2,12 +2,54 @@
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
+# n8n 2.0 Configuration Notes:
+# - This configuration is compatible with n8n 2.x
+# - Task runners are enabled by default in n8n 2.0 for improved security
+# - Environment variables below configure n8n for optimal Fly.io deployment
+# - See https://docs.n8n.io/2-0-breaking-changes/ for migration details
 
 app = 'n8n-run'
 primary_region = 'ams'
 
 [build]
   image = 'n8nio/n8n'
+
+# n8n 2.0 Environment Variables
+# These settings ensure compatibility with n8n 2.x and configure security defaults
+[env]
+  # Basic n8n configuration
+  N8N_PORT = "5678"
+  N8N_PROTOCOL = "https"
+  GENERIC_TIMEZONE = "Europe/Amsterdam"
+  TZ = "Europe/Amsterdam"
+
+  # n8n 2.0 Security Settings
+  # Task runners are enabled by default in 2.0 - Code nodes run in isolated environments
+  N8N_RUNNERS_ENABLED = "true"
+  N8N_RUNNERS_MODE = "internal"
+
+  # Block environment variable access from Code nodes (n8n 2.0 default)
+  # Set to "false" if you need Code nodes to access environment variables
+  N8N_BLOCK_ENV_ACCESS_IN_NODE = "true"
+
+  # Execution settings for better reliability
+  EXECUTIONS_MODE = "regular"
+  EXECUTIONS_DATA_SAVE_ON_ERROR = "all"
+  EXECUTIONS_DATA_SAVE_ON_SUCCESS = "all"
+  EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS = "true"
+
+  # Webhook configuration for Fly.io
+  WEBHOOK_URL = "https://n8n-run.fly.dev"
+  N8N_EDITOR_BASE_URL = "https://n8n-run.fly.dev"
+
+  # Database configuration (n8n 2.0 - SQLite with pooling is default)
+  # Note: n8n 2.0 dropped MySQL/MariaDB support - use PostgreSQL for production scale
+  DB_TYPE = "sqlite"
+  DB_SQLITE_POOL_SIZE = "10"
+
+  # Disable nodes that are security risks (n8n 2.0 defaults)
+  # These allow arbitrary command execution and file system access
+  N8N_NODES_EXCLUDE = "[\"n8n-nodes-base.executeCommand\",\"n8n-nodes-base.localFileTrigger\"]"
 
 [http_service]
   internal_port = 5678
@@ -17,8 +59,18 @@ primary_region = 'ams'
   min_machines_running = 0
   processes = ['app']
 
+# Health check for n8n
+[[http_service.checks]]
+  grace_period = "30s"
+  interval = "30s"
+  method = "GET"
+  timeout = "10s"
+  path = "/healthz"
+
 [[vm]]
-  memory = '1gb'
+  # Increased memory for n8n 2.0 task runners
+  # Task runners require additional memory for isolated code execution
+  memory = '2gb'
   cpu_kind = 'shared'
   cpus = 1
 
