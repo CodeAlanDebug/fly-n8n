@@ -176,12 +176,69 @@ filter_stable_versions() {
     done
 }
 
+# Check whether a string is a strict X.Y.Z semantic version
+# Args: $1 - candidate string
+# Returns: 0 if it is a semver, 1 otherwise
+is_semver() {
+    [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+# Extract the major component of a semantic version
+# Args: $1 - version (e.g. 2.27.1)
+# Returns: major number (e.g. 2)
+major_of() {
+    echo "${1%%.*}"
+}
+
+# Parse the version tag out of a container image reference.
+# Handles repo:tag, registry/host:port style refs, and an optional @sha256
+# digest suffix. A pure digest (no tag) returns empty - the version is unknown,
+# which is what lets the caller decide to re-pin to an explicit tag.
+# Args: $1 - image reference (e.g. n8nio/n8n:2.27.1)
+# Returns: the tag (e.g. 2.27.1), or empty if the ref carries no tag
+parse_version_from_image() {
+    local image="$1"
+    [ -z "$image" ] && return 0
+
+    # Drop any "@sha256:..." digest suffix; what remains is repo[:tag]
+    local ref="${image%@*}"
+
+    # Look only at the final path segment so a registry host:port is never
+    # mistaken for a tag (e.g. "host:5000/n8n" has no tag)
+    local last="${ref##*/}"
+
+    case "$last" in
+        *:*) echo "${last##*:}" ;;
+        *)   return 0 ;;
+    esac
+}
+
+# Keep only versions belonging to a given major series
+# Args: $1 - major number. Versions via stdin, one per line.
+# Returns: matching versions, one per line
+filter_major() {
+    local major="$1"
+    while IFS= read -r version; do
+        [ -z "$version" ] && continue
+        if [ "$(major_of "$version")" = "$major" ]; then
+            echo "$version"
+        fi
+    done
+}
+
 # Compare two semantic versions
 # Args: $1 - version1, $2 - version2
 # Returns: 0 if version1 > version2, 1 if version1 <= version2
 version_greater_than() {
     local v1="$1"
     local v2="$2"
+
+    # Non-semver inputs (e.g. a floating 'latest' tag or an image digest)
+    # cannot be ordered numerically. Treat them as "not greater" instead of
+    # letting the integer comparisons below error out on bad input.
+    if ! is_semver "$v1" || ! is_semver "$v2"; then
+        return 1
+    fi
 
     # Split versions into components
     IFS='.' read -ra v1_parts <<< "$v1"
@@ -311,12 +368,17 @@ query_flyio_version() {
 
     # Extract version tag from image (format: n8nio/n8n:1.2.3)
     local version_tag
-    version_tag=$(echo "$image" | sed 's/.*://')
+    version_tag=$(parse_version_from_image "$image")
 
     if [ -z "$version_tag" ]; then
-        echo "WARNING: Could not extract version from image: $image" >&2
+        echo "WARNING: Could not extract a version tag from image: $image" >&2
+        echo "         (image is pinned by digest, so the running version is" >&2
+        echo "          unknown - the next deploy will re-pin it to a tag)" >&2
         return 0
     fi
+
+    # Record what we resolved so a stuck/looping state is visible in the logs
+    echo "INFO: Resolved running version '$version_tag' from image '$image'" >&2
 
     echo "$version_tag"
     return 0
@@ -337,6 +399,13 @@ needs_update() {
     # If latest version is empty, cannot update
     if [ -z "$latest_version" ]; then
         return 1
+    fi
+
+    # If the deployed tag is not a strict semver (e.g. a floating 'latest' tag
+    # or an image digest), we cannot reason about it - pin it to the explicit
+    # target version so subsequent runs can compare normally.
+    if ! is_semver "$current_version"; then
+        return 0
     fi
 
     # If versions are equal, no update needed

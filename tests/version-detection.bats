@@ -3303,3 +3303,114 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" =~ "Workflow executed" ]]
 }
+
+# ---------------------------------------------------------------------------
+# Regression: non-semver deployed tag (e.g. 'latest') wedged the pipeline at
+# "up to date" forever. See needs_update / version_greater_than hardening.
+# ---------------------------------------------------------------------------
+
+@test "Non-semver current - 'latest' tag triggers update (pin to explicit version)" {
+    run bash -c '
+        source scripts/version-detection.sh
+        needs_update "latest" "1.123.57"
+    '
+    # Should return 0 (true) - update needed to pin the floating tag
+    [ "$status" -eq 0 ]
+}
+
+@test "Non-semver current - comparison emits no integer-expression errors" {
+    run bash -c '
+        source scripts/version-detection.sh
+        version_greater_than "1.123.57" "latest"
+    '
+    # Must not leak bash "[: integer expression expected" noise
+    [[ ! "$output" =~ "integer expression expected" ]]
+}
+
+@test "Non-semver current - version_greater_than returns false for unorderable input" {
+    run bash -c '
+        source scripts/version-detection.sh
+        version_greater_than "1.123.57" "latest"
+    '
+    [ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Major-version policy: auto minor/patch within a pinned major, hold new majors
+# ---------------------------------------------------------------------------
+
+@test "major_of - extracts major component" {
+    run bash -c '
+        source scripts/version-detection.sh
+        echo "$(major_of "2.27.1")"
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "2" ]
+}
+
+@test "filter_major - keeps only versions in the pinned major series" {
+    run bash -c '
+        source scripts/version-detection.sh
+        printf "1.123.57\n2.27.1\n1.100.0\n2.0.0\n" | filter_major "1"
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "1.123.57" ]]
+    [[ "$output" =~ "1.100.0" ]]
+    [[ ! "$output" =~ "2.27.1" ]]
+    [[ ! "$output" =~ "2.0.0" ]]
+}
+
+@test "filter_major - target within major selects highest 1.x, holding 2.x back" {
+    run bash -c '
+        source scripts/version-detection.sh
+        printf "2.27.1\n1.123.57\n1.123.56\n2.0.0\n" | filter_major "1" | find_latest_version
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "1.123.57" ]
+}
+
+# ---------------------------------------------------------------------------
+# Recording the deployed version: parse the Fly image ref into a version tag.
+# After an explicit-tag deploy Fly reports the tag, so the next run can compare.
+# ---------------------------------------------------------------------------
+
+@test "parse_version_from_image - explicit semver tag" {
+    run bash -c '
+        source scripts/version-detection.sh
+        parse_version_from_image "n8nio/n8n:2.27.1"
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "2.27.1" ]
+}
+
+@test "parse_version_from_image - floating latest tag" {
+    run bash -c '
+        source scripts/version-detection.sh
+        parse_version_from_image "n8nio/n8n:latest"
+    '
+    [ "$output" = "latest" ]
+}
+
+@test "parse_version_from_image - registry host with tag" {
+    run bash -c '
+        source scripts/version-detection.sh
+        parse_version_from_image "registry.fly.io/n8n-run:2.27.1"
+    '
+    [ "$output" = "2.27.1" ]
+}
+
+@test "parse_version_from_image - tag plus digest keeps the tag" {
+    run bash -c '
+        source scripts/version-detection.sh
+        parse_version_from_image "n8nio/n8n:2.27.1@sha256:deadbeef"
+    '
+    [ "$output" = "2.27.1" ]
+}
+
+@test "parse_version_from_image - pure digest yields empty (version unknown)" {
+    run bash -c '
+        source scripts/version-detection.sh
+        parse_version_from_image "registry.fly.io/n8n-run@sha256:deadbeef"
+    '
+    [ -z "$output" ]
+}

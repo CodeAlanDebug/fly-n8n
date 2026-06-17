@@ -38,6 +38,16 @@ jobs:
     name: 🚀 Check for updates and deploy
     runs-on: ubuntu-latest
 
+    # Pinned major version line for auto-deploy.
+    # The deployed instance currently runs n8n 2.x, so this is pinned to 2.
+    # The workflow only auto-deploys minor/patch releases WITHIN this major
+    # (e.g. 2.13.x -> 2.27.1). When a newer major is published it is reported
+    # but held for manual approval - bump this number (and deploy once) to
+    # move to the new major. NEVER lower it below the running major: that
+    # would attempt a downgrade the persisted database cannot survive.
+    env:
+      N8N_MAJOR: '2'
+
     steps:
       - name: 🎬 Workflow Started
         run: |
@@ -112,25 +122,42 @@ jobs:
 
           echo "📦 Fetching available tags..."
 
-          # Extract tag names, filter out pre-releases, and find the highest semantic version
-          # Filtering logic:
-          # - Excludes tags with hyphens (pre-release identifiers like 1.0.0-beta)
-          # - Excludes non-semantic tags (latest, next, etc.)
-          # - Sorts remaining versions using semantic versioning rules
-          tags=$(extract_tag_names "$response")
-          latest_version=$(echo "$tags" | filter_stable_versions | find_latest_version)
+          # Extract tag names and keep only stable semantic versions
+          # (excludes hyphenated pre-releases and non-semver tags like 'latest')
+          stable=$(extract_tag_names "$response" | filter_stable_versions)
+
+          # Highest stable version overall (across all majors)
+          latest_overall=$(echo "$stable" | find_latest_version)
+
+          # Deploy target: highest stable version WITHIN the pinned major.
+          # This implements the "auto minor/patch, hold majors" policy - new
+          # major versions are reported below but never auto-deployed.
+          latest_version=$(echo "$stable" | filter_major "$N8N_MAJOR" | find_latest_version)
 
           if [ -z "$latest_version" ]; then
-            echo "❌ ERROR: Could not determine latest stable version"
+            echo "❌ ERROR: Could not determine latest stable version in major $N8N_MAJOR"
             exit 1
           fi
 
+          # Detect a newer major line that is being held back for manual approval
+          held_major=""
+          if [ -n "$latest_overall" ] && \
+             [ "$(major_of "$latest_overall")" -gt "$N8N_MAJOR" ]; then
+            held_major=$(major_of "$latest_overall")
+            echo ""
+            echo "⏸️  Newer major available: v$latest_overall (major $held_major)"
+            echo "    Held for manual approval. To upgrade, bump N8N_MAJOR to"
+            echo "    $held_major in .github/workflows/deploy-n8n.yml."
+          fi
+
           echo ""
-          echo "✅ Latest stable version: $latest_version"
+          echo "✅ Latest stable in major $N8N_MAJOR: $latest_version"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          # Set output variable for use in subsequent steps
+          # Set output variables for use in subsequent steps
           echo "latest_version=$latest_version" >> $GITHUB_OUTPUT
+          echo "latest_overall=$latest_overall" >> $GITHUB_OUTPUT
+          echo "held_major=$held_major" >> $GITHUB_OUTPUT
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
@@ -387,5 +414,18 @@ jobs:
           # Create and display a formatted summary of the workflow execution
           # This appears in the GitHub Actions UI for easy monitoring
           create_workflow_summary "$action" "$current_version" "$latest_version"
+
+          # If a newer major line is being held back, flag it in the summary so
+          # the manual-approval decision is visible without digging into logs.
+          held_major="${{ steps.detect-version.outputs.held_major }}"
+          latest_overall="${{ steps.detect-version.outputs.latest_overall }}"
+          if [ -n "$held_major" ] && [ -n "$GITHUB_STEP_SUMMARY" ]; then
+            {
+              echo ""
+              echo "> ⏸️ **Major upgrade held for manual approval:** v$latest_overall"
+              echo "> (major $held_major). Auto-deploy is pinned to major"
+              echo "> \`$N8N_MAJOR\`. Bump \`N8N_MAJOR\` in the workflow to upgrade."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
