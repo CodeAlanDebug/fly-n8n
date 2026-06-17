@@ -356,23 +356,30 @@ jobs:
           echo "🏥 Verifying deployment health..."
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          # Wait a few seconds for deployment to stabilize
-          # This allows Fly.io's health checks to complete and machines to start
-          echo "⏳ Waiting 10 seconds for deployment to stabilize..."
-          sleep 10
+          # Poll for a healthy machine instead of a single fixed-delay check.
+          # n8n 2.x runs DB migrations on first boot before it binds port 5678,
+          # so a one-shot check 10s after deploy reported a false "no healthy
+          # machines" failure even though the app came up fine moments later.
+          # Retry up to ~2 minutes, succeeding as soon as a machine is running.
+          echo "🔍 Polling machine status (up to 120s for migrate + port bind)..."
+          healthy=false
+          for attempt in $(seq 1 8); do
+            sleep 15
+            if verify_deployment_health "$app_name"; then
+              healthy=true
+              echo "✅ Healthy after ~$((attempt * 15))s"
+              break
+            fi
+            echo "   … not ready yet (attempt ${attempt}/8), retrying"
+          done
 
-          # Verify that at least one machine is running
-          # Uses: flyctl status --json to query machine states
-          # Checks for machines in "started" or "running" state
-          # Note: Fly.io automatically rolls back failed deployments
-          echo "🔍 Checking machine status..."
-          if verify_deployment_health "$app_name"; then
+          if [ "$healthy" = "true" ]; then
             echo ""
             echo "✅ Deployment is healthy and running!"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           else
             echo ""
-            echo "❌ ERROR: Deployment health check failed"
+            echo "❌ ERROR: Deployment health check failed after 120s"
             echo "   Fly.io may automatically rollback to the previous version"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             exit 1

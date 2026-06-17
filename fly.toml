@@ -6,8 +6,13 @@
 app = 'n8n-run'
 primary_region = 'ams'
 
+# Pinned to an explicit version on purpose. A floating ':latest' here is what
+# wedged the auto-deploy pipeline (the running image reported tag "latest",
+# which broke version comparison). The GitHub Actions workflow overrides this
+# per-deploy via `flyctl deploy --image n8nio/n8n:<version>`; this value is the
+# backstop for any bare `flyctl deploy`. Never set it back to an untagged image.
 [build]
-  image = 'n8nio/n8n'
+  image = 'n8nio/n8n:2.27.1'
 
 [http_service]
   internal_port = 5678
