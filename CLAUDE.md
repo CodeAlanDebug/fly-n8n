@@ -23,7 +23,7 @@ published tag), because n8n may publish a higher tag (e.g. `2.27.1`) before prom
 
 ## Architecture
 
-Two files hold all the behavior; everything else is config or docs.
+The workflow + the sourced bash library hold all the behavior; everything else is config or docs.
 
 - **`.github/workflows/deploy-n8n.yml`** (job `check-and-deploy`) — orchestration only. Steps
   `source scripts/version-detection.sh` and call its functions. State passes between steps via
@@ -40,8 +40,12 @@ Two files hold all the behavior; everything else is config or docs.
   `N8N_MAJOR`. **Never lower it below the running major** (downgrade = data loss; the 2.x DB can't be
   read by 1.x).
 
-- **`scripts/version-detection.sh`** — all logic, as sourced bash functions (no `main`, nothing runs
-  on source). The deploy decision flows through these:
+- **`scripts/version-detection.sh`** — a thin **aggregator** that `source`s `scripts/lib/*.sh` so
+  callers (workflow + tests) source one file and get every function. The functions live in
+  `scripts/lib/` grouped by concern: `logging.sh`, `dockerhub.sh`, `versions.sh` (the pure semver
+  logic + the deploy decision + fly.toml read/write), `flyio.sh` (flyctl), `release_notes.sh`. No
+  `main`, nothing runs on source; cross-module calls resolve at call time once all are loaded. The
+  deploy decision flows through these:
   1. `query_dockerhub_tags` → hits `hub.docker.com/v2/repositories/n8nio/n8n/tags`, validates JSON.
   2. `resolve_latest_version "$json"` → finds the `latest` tag's digest, then the highest stable
      `X.Y.Z` tag sharing that digest. This is **what n8n promotes as `:latest`, as an explicit tag** —
@@ -83,23 +87,30 @@ Two files hold all the behavior; everything else is config or docs.
 - The pin step commits `fly.toml` with the built-in `GITHUB_TOKEN` (`permissions: contents: write`).
 - External services with no fallback: Docker Hub tags API, Fly.io (`flyctl`), GitHub releases API.
 - Tooling assumed present in CI: `jq`, `curl`, `flyctl` (installed via `superfly/flyctl-actions`).
-- `query_flyio_version` is now unused (current comes from `fly.toml`); still tested, harmless — a
-  cleanup candidate for the planned decomposition.
+- `query_flyio_version` (in `lib/flyio.sh`) is unused by the workflow (current comes from `fly.toml`);
+  kept and tested for diagnostics. Safe to delete with its tests if you want it gone.
 
 ## Tests
 
-`tests/version-detection.bats` (~120 cases) is a [bats](https://github.com/bats-core/bats-core) suite.
-It tests the pure functions by `source`-ing the script and **stubbing `curl`/`flyctl` as shell
-functions** — no real network or Fly calls. bats is not installed by default.
+[bats](https://github.com/bats-core/bats-core) suites (137 cases), split per lib module to mirror
+`scripts/lib/`: `tests/dockerhub.bats`, `versions.bats`, `flyio.bats`, `logging.bats`,
+`integration.bats`. Each loads `tests/test_helper.bash` (which sources the aggregator) in `setup()`.
+Tests **stub `curl`/`flyctl` as shell functions** — no real network or Fly calls. bats isn't installed
+by default.
 
 ```bash
-brew install bats-core              # one-time
-bats tests/version-detection.bats   # run all
-bats tests/version-detection.bats -f "API error handling"   # run by name filter
+brew install bats-core                 # one-time
+bats tests/*.bats                       # run all 137
+bats tests/versions.bats                # one module
+bats tests/flyio.bats -f "Health"       # filter by name
 ```
 
+**2 known-failing tests** (`logging.bats` "Workflow summary - formatted for readability",
+`integration.bats` "all logging functions are called") are **pre-existing** — stale assertions about
+summary output, unrelated to recent changes; they fail on the original code too. Everything else passes.
+
 When you add or change a function, keep its stdout-is-the-value / stderr-is-logs contract and its
-documented return codes intact, or the stubs in the bats suite will break.
+documented return codes intact, or the stubs will break.
 
 ## Lint
 
