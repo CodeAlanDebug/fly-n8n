@@ -3460,3 +3460,46 @@ setup() {
     # two-space indentation preserved
     [[ "$output" =~ "line:  image" ]]
 }
+
+# ---------------------------------------------------------------------------
+# Track n8n's promoted ':latest' as an explicit version (resolve by digest).
+# We deploy the matching X.Y.Z tag, never the floating ':latest' tag itself.
+# ---------------------------------------------------------------------------
+
+@test "resolve_latest_version - maps :latest digest to its version tag" {
+    run bash -c '
+        source scripts/version-detection.sh
+        json='"'"'{"results":[
+          {"name":"latest","digest":"sha256:AAA"},
+          {"name":"2.26.6","digest":"sha256:AAA"},
+          {"name":"2.26","digest":"sha256:AAA"},
+          {"name":"2.27.1","digest":"sha256:BBB"},
+          {"name":"next","digest":"sha256:CCC"}
+        ]}'"'"'
+        resolve_latest_version "$json"
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "2.26.6" ]
+}
+
+@test "resolve_latest_version - no latest tag yields empty" {
+    run bash -c '
+        source scripts/version-detection.sh
+        json='"'"'{"results":[{"name":"2.27.1","digest":"sha256:BBB"}]}'"'"'
+        resolve_latest_version "$json"
+    '
+    [ -z "$output" ]
+}
+
+@test "resolve_latest_version - picks highest semver when several share the digest" {
+    run bash -c '
+        source scripts/version-detection.sh
+        json='"'"'{"results":[
+          {"name":"latest","digest":"sha256:AAA"},
+          {"name":"2.26.5","digest":"sha256:AAA"},
+          {"name":"2.26.6","digest":"sha256:AAA"}
+        ]}'"'"'
+        resolve_latest_version "$json"
+    '
+    [ "$output" = "2.26.6" ]
+}

@@ -5,64 +5,65 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 This repo contains **no application code**. It is the deployment automation for a self-hosted n8n
-instance running on Fly.io. It checks Docker Hub daily for the latest *stable* n8n release and, if
-newer than what's pinned, **bumps the image tag in `fly.toml` and pushes**. The deploy itself is done
-by **Fly.io's own deploy-on-push trigger** (a Fly GitHub App, configured outside this repo), which
-deploys whatever `fly.toml` pins. n8n itself is the upstream `n8nio/n8n` Docker image — never built here.
+instance running on Fly.io. Daily, it resolves the version n8n promotes to its `:latest` Docker tag
+(by digest → explicit `X.Y.Z`), and if that's newer than what's deployed *within the pinned major*,
+it `flyctl deploy`s that **explicit** version tag and records it in `fly.toml`. n8n itself is the
+upstream `n8nio/n8n` Docker image — never built here.
 
-**Why this split (important history):** there used to be *two* deployers racing — this workflow ran
-`flyctl deploy --image …` while the Fly trigger concurrently deployed `fly.toml`'s then-untagged
-`n8nio/n8n` (= `:latest`). The Fly trigger won and kept slapping `:latest` on the app, which is the
-floating tag that wedged version detection (see the trap below). The Fly trigger could not be easily
-disabled, so the design was inverted: **`fly.toml` is the single source of truth**, this workflow only
-*edits the pin*, and the Fly trigger is the sole deployer. One deployer, no race, never `:latest`.
+**Two deployers, reconciled (important history):** a **Fly deploy-on-push trigger** (a Fly GitHub App,
+confirmed via `gh api repos/.../deployments` showing `fly-io[bot]`; configured outside this repo and
+not reliably disablable) coexists with this workflow. It used to deploy `fly.toml`'s then-untagged
+`n8nio/n8n` (= `:latest`) and race/overwrite this workflow's deploy — and that floating `:latest` is
+what wedged version detection (see the trap below). The fix is **pinning `fly.toml` to an explicit
+tag**: now whenever the Fly trigger fires it deploys that same pinned version, never `:latest`, so the
+two deployers can't conflict. This workflow is the *reliable* deployer (flyctl); the Fly trigger is a
+harmless echo. **Tracking choice:** the updater follows n8n's promoted `:latest` (not the highest
+published tag), because n8n may publish a higher tag (e.g. `2.27.1`) before promoting it to `:latest`
+(which was `2.26.6`).
 
 ## Architecture
 
 Two files hold all the behavior; everything else is config or docs.
 
-- **`.github/workflows/deploy-n8n.yml`** (job `check-and-bump`) — orchestration only. Steps
+- **`.github/workflows/deploy-n8n.yml`** (job `check-and-deploy`) — orchestration only. Steps
   `source scripts/version-detection.sh` and call its functions. State passes between steps via
-  `$GITHUB_OUTPUT` (`latest_version`, `latest_overall`, `held_major`, `current_version`,
-  `needs_update`, `pushed`). The bump/summary steps are gated on
-  `steps.compare.outputs.needs_update == 'true'`. Triggers: daily cron `0 2 * * *`, push to `main`,
-  manual `workflow_dispatch`. **It does not deploy** — the bump step edits `fly.toml` and `git push`es;
-  Fly's trigger deploys. `permissions: contents: write` is required for that push. The push is authored
-  by `github-actions[bot]`/`GITHUB_TOKEN`, which by GitHub's rules does **not** re-trigger this workflow
-  (no loop) but **does** reach the Fly GitHub App (deploy fires).
+  `$GITHUB_OUTPUT` (`target_version`, `resolved`, `held_major`, `current_version`, `needs_update`,
+  `deployment_status`). Deploy/health/pin steps are gated on `needs_update == 'true'`. Triggers: daily
+  cron `0 2 * * *`, push to `main`, manual `workflow_dispatch`. Flow: detect target → read current
+  (from `fly.toml`) → compare → `deploy_to_flyio` (flyctl) → poll health (up to 120s) → commit the new
+  pin into `fly.toml` (`permissions: contents: write`, pushed as `github-actions[bot]`). The fly.toml
+  commit is recorded *after* a confirmed-healthy deploy, so `fly.toml` never claims a version that
+  isn't actually running.
 
-  **`N8N_MAJOR` (job-level env, currently `'2'`) is the policy knob.** The workflow only auto-bumps
-  minor/patch releases *within this major* (`filter_major` selects the target); a newer major is
-  detected (`held_major`) and reported in the summary but never auto-bumped — to move majors, bump
-  `N8N_MAJOR`. **Never lower it below the running major** — the instance runs n8n 2.x and its persisted
-  DB cannot be read by an older major (downgrade = data loss).
+  **`N8N_MAJOR` (job-level env, currently `'2'`) is the policy knob.** If n8n's `:latest` resolves to a
+  major greater than this, it's reported (`held_major`) but not deployed — to move majors, bump
+  `N8N_MAJOR`. **Never lower it below the running major** (downgrade = data loss; the 2.x DB can't be
+  read by 1.x).
 
 - **`scripts/version-detection.sh`** — all logic, as sourced bash functions (no `main`, nothing runs
-  on source). The bump decision flows through these:
+  on source). The deploy decision flows through these:
   1. `query_dockerhub_tags` → hits `hub.docker.com/v2/repositories/n8nio/n8n/tags`, validates JSON.
-  2. `extract_tag_names` → `filter_stable_versions` → `filter_major "$N8N_MAJOR"` → `find_latest_version`
-     — stable filter drops anything with `-`/`beta`/`alpha`/`rc`; max picked via `version_greater_than`
-     (manual numeric major/minor/patch compare, **not** `sort -V`).
-  3. `read_pinned_version fly.toml` → greps the `[build] image` line and runs `parse_version_from_image`
-     on it. **This replaced `query_flyio_version` as the source of current version** — the version now
-     comes from the explicit tag in `fly.toml`, never from `flyctl status`. `parse_version_from_image`
-     handles `repo:tag`, `host:port/repo`, and `@sha256` digests (digest → empty).
-  4. `needs_update` → empty *or non-semver* current (e.g. an untagged image) means bump; else semver
-     compare. `is_semver` guards `version_greater_than` so bad input returns "not greater" not an error.
-  5. `bump_flytoml_image fly.toml <version>` → portable `sed -i.bak` rewrite of the image line,
-     preserving indentation. The workflow commits + pushes the result.
-  6. Release-notes functions (`fetch_release_notes`, `create_version_summary`, …) hit the GitHub
-     releases API for `n8n@<version>` for the run summary; `continue-on-error`, never blocks the bump.
+  2. `resolve_latest_version "$json"` → finds the `latest` tag's digest, then the highest stable
+     `X.Y.Z` tag sharing that digest. This is **what n8n promotes as `:latest`, as an explicit tag** —
+     we deploy that, never the floating `:latest`. (`filter_stable_versions`/`find_latest_version`/
+     `version_greater_than` are the helpers; comparison is manual numeric, **not** `sort -V`.)
+  3. `read_pinned_version fly.toml` → greps the `[build] image` line, runs `parse_version_from_image`
+     (handles `repo:tag`, `host:port/repo`, `@sha256` digests). **This is the source of "current"** —
+     read from `fly.toml`'s explicit tag, never `flyctl status`, so the `:latest` string can't enter.
+     Sound because the deploy step keeps `fly.toml` in sync with what it actually deployed.
+  4. `needs_update` → empty/non-semver current or held target → handled; else semver compare.
+     `is_semver` guards `version_greater_than` so bad input returns "not greater" not an error.
+  5. `deploy_to_flyio <version> <app>` → `flyctl deploy --app <app> --image n8nio/n8n:<version>`
+     (`--image` preserves volumes/env). `verify_deployment_health` polls machine state post-deploy.
+  6. `bump_flytoml_image fly.toml <version>` → portable `sed -i.bak` rewrite of the image line,
+     committed after a healthy deploy.
+  7. Release-notes functions (`fetch_release_notes`, `create_version_summary`, …) → GitHub releases API
+     for the run summary; `continue-on-error`, never blocks the deploy.
 
-  **The `latest`-tag trap (root cause history):** the instance was deployed untagged
-  (`n8nio/n8n` → tag `latest`), so `flyctl status` reported the literal string `latest` as the version.
-  That non-semver value hit `[: latest: integer expression expected` and silently wedged the old
-  pipeline at "up to date". The fix is structural: the version is read from `fly.toml`'s explicit tag,
-  and `fly.toml` is pinned (never untagged), so `latest` never enters comparison again.
-
-  **Dead code:** `query_flyio_version`, `deploy_to_flyio`, `verify_deployment_health` are no longer
-  called by the workflow (the Fly trigger deploys now). They're still tested and harmless; remove them
-  (and their tests) during the planned decomposition.
+  **The `latest`-tag trap (root cause history):** the instance was deployed untagged (`n8nio/n8n` →
+  tag `latest`), so `flyctl status` reported the literal string `latest` as the version. That non-semver
+  value hit `[: latest: integer expression expected` and silently wedged the old pipeline at "up to
+  date". Fixed structurally: deploy explicit tags, pin `fly.toml`, read current from `fly.toml`.
 
   **Convention:** human-facing/log output goes to **stderr** (`>&2`); stdout is the function's return
   value (a version string, etc.) so callers can capture it cleanly. Moving a log line to stdout corrupts
@@ -70,19 +71,20 @@ Two files hold all the behavior; everything else is config or docs.
   output had no "deploy").
 
 - **`fly.toml`** — the Fly app config (app `n8n-run`, region `ams`, port 5678, `n8n_data` volume at
-  `/home/node/.n8n`) **and the single source of truth for the deployed n8n version**:
-  `[build].image = 'n8nio/n8n:<version>'`, currently pinned. **Never set it back to an untagged image**
-  — that reintroduces the `:latest` trap. To change versions, edit this tag (the workflow does this
-  automatically); the Fly trigger deploys it on push.
+  `/home/node/.n8n`) **and the recorded deployed n8n version**: `[build].image = 'n8nio/n8n:<version>'`,
+  currently `2.26.6` (= what `:latest` resolves to, = what's running). **Never set it to an untagged
+  image** — that reintroduces the `:latest` trap and makes the Fly trigger publish `:latest`. The deploy
+  workflow keeps this tag in sync with reality.
 
 ## Secrets / external dependencies
 
-- **No `FLY_API_TOKEN` needed by the workflow anymore** — it doesn't call `flyctl` (the Fly trigger
-  deploys). The legacy `flyctl` functions still reference the token, but they're dead code. Fly auth
-  lives entirely in the Fly GitHub App / trigger now.
-- The bump step pushes with the built-in `GITHUB_TOKEN` (granted by `permissions: contents: write`).
-- External services with no fallback: Docker Hub tags API, GitHub releases API.
-- Tooling assumed present in CI: `jq`, `curl` (no flyctl install step anymore).
+- `FLY_API_TOKEN` — GitHub Actions secret, required by the deploy + health steps (`flyctl`). Create
+  with `flyctl tokens create deploy`. Never echo it.
+- The pin step commits `fly.toml` with the built-in `GITHUB_TOKEN` (`permissions: contents: write`).
+- External services with no fallback: Docker Hub tags API, Fly.io (`flyctl`), GitHub releases API.
+- Tooling assumed present in CI: `jq`, `curl`, `flyctl` (installed via `superfly/flyctl-actions`).
+- `query_flyio_version` is now unused (current comes from `fly.toml`); still tested, harmless — a
+  cleanup candidate for the planned decomposition.
 
 ## Tests
 

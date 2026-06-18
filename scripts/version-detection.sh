@@ -190,6 +190,26 @@ major_of() {
     echo "${1%%.*}"
 }
 
+# Resolve the version that n8n's ':latest' tag currently points to, by digest.
+# n8n promotes a specific stable release to ':latest'; we deploy the matching
+# explicit X.Y.Z tag (never ':latest' itself, which would re-create the trap).
+# Args: $1 - JSON response from query_dockerhub_tags
+# Returns: the highest stable version tag sharing ':latest's digest, or empty
+resolve_latest_version() {
+    local json="$1"
+    local latest_digest
+    latest_digest=$(echo "$json" \
+        | jq -r '.results[]? | select(.name == "latest") | .digest // empty' 2>/dev/null \
+        | head -1)
+
+    [ -z "$latest_digest" ] && return 0
+
+    echo "$json" \
+        | jq -r --arg d "$latest_digest" '.results[]? | select(.digest == $d) | .name' 2>/dev/null \
+        | filter_stable_versions \
+        | find_latest_version
+}
+
 # Read the pinned n8n version from fly.toml's [build] image line.
 # fly.toml is the single source of truth for the deployed version; the Fly
 # deploy-on-push trigger deploys whatever tag is pinned here.

@@ -1,43 +1,38 @@
-name: Auto-bump n8n version
+name: Deploy n8n to Fly.io
 
-# Detects new stable n8n releases and bumps the pinned image in fly.toml.
-# It does NOT deploy directly. Fly.io's deploy-on-push trigger deploys whatever
-# version is pinned in fly.toml, so this workflow's only job is to keep that pin
-# current. One deployer (Fly), no race, and the running version is always an
-# explicit tag (never the floating ':latest' that originally wedged the pipeline).
+# Tracks the version n8n promotes to its ':latest' Docker tag and deploys it to
+# Fly.io as an EXPLICIT version tag (never ':latest' itself - a floating tag on
+# the machine is what originally wedged version detection).
+#
+# This workflow is the reliable deployer (flyctl). fly.toml's [build].image is
+# kept in sync with what is deployed, so:
+#   - the current version is read from fly.toml (always an explicit tag), and
+#   - Fly's own deploy-on-push trigger, when it fires, deploys the same pinned
+#     version (never ':latest'), so the two deployers can no longer conflict.
 "on":
-  # A push to main is what the Fly trigger deploys on; running here too lets us
-  # re-pin if fly.toml was hand-edited to an untagged/older image.
   push:
     branches:
       - main
-
-  # Daily check for new stable releases.
   schedule:
     - cron: '0 2 * * *'
-
-  # Manual run from the Actions tab.
   workflow_dispatch:
 
 concurrency:
-  group: auto-bump-n8n
+  group: deploy-n8n
   cancel-in-progress: false
 
-# Needs write access to commit the fly.toml bump back to main.
 permissions:
   contents: write
 
 jobs:
-  check-and-bump:
-    name: 🔍 Check for updates and bump fly.toml
+  check-and-deploy:
+    name: 🚀 Check for updates and deploy
     runs-on: ubuntu-latest
 
-    # Pinned major version line for auto-bump.
-    # The deployed instance runs n8n 2.x, so this is pinned to 2. The workflow
-    # only auto-bumps minor/patch releases WITHIN this major (e.g. 2.13.x ->
-    # 2.27.1). A newer major is reported but held for manual approval - bump
-    # this number to move to the new major. NEVER lower it below the running
-    # major: that would pin a downgrade the persisted database cannot survive.
+    # Pinned major line. The instance runs n8n 2.x, so this is 2. We only
+    # auto-deploy within this major; if n8n promotes a newer major to :latest
+    # it is reported but HELD - bump this number to move majors. NEVER lower it
+    # below the running major: the persisted DB cannot survive a downgrade.
     env:
       N8N_MAJOR: '2'
 
@@ -45,150 +40,184 @@ jobs:
       - name: 📥 Checkout repository
         uses: actions/checkout@v6
 
-      # Detect the latest stable n8n version from Docker Hub.
-      - name: 🔍 Detect latest n8n version from Docker Hub
-        id: detect-version
+      - name: 🔧 Install Fly.io CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # Resolve the explicit version that n8n's ':latest' tag points to.
+      - name: 🔍 Detect n8n :latest version
+        id: detect
         run: |
           source scripts/version-detection.sh
 
-          echo "🔍 Querying Docker Hub for latest n8n version..."
           response=$(query_dockerhub_tags)
           if [ $? -ne 0 ]; then
             echo "❌ ERROR: Failed to query Docker Hub"
             exit 1
           fi
 
-          # Keep only stable semantic versions (drops pre-releases and 'latest')
-          stable=$(extract_tag_names "$response" | filter_stable_versions)
-
-          # Highest stable overall, and the deploy target within the pinned major
-          latest_overall=$(echo "$stable" | find_latest_version)
-          latest_version=$(echo "$stable" | filter_major "$N8N_MAJOR" | find_latest_version)
-
-          if [ -z "$latest_version" ]; then
-            echo "❌ ERROR: Could not determine latest stable version in major $N8N_MAJOR"
+          resolved=$(resolve_latest_version "$response")
+          if [ -z "$resolved" ]; then
+            echo "❌ ERROR: Could not resolve n8n :latest to a version"
             exit 1
           fi
+          echo "🏷️  n8n :latest resolves to $resolved"
 
-          # Report (but never auto-bump to) a newer major held for approval
+          # Hold the deploy if :latest has moved to a newer major than we pin.
+          target_version="$resolved"
           held_major=""
-          if [ -n "$latest_overall" ] && \
-             [ "$(major_of "$latest_overall")" -gt "$N8N_MAJOR" ]; then
-            held_major=$(major_of "$latest_overall")
-            echo "⏸️  Newer major available: v$latest_overall (major $held_major)"
-            echo "    Held for manual approval. Bump N8N_MAJOR to $held_major to upgrade."
+          if [ "$(major_of "$resolved")" -gt "$N8N_MAJOR" ]; then
+            held_major=$(major_of "$resolved")
+            target_version=""
+            echo "⏸️  :latest is now major $held_major (v$resolved) - HELD."
+            echo "    Bump N8N_MAJOR to $held_major to move to it."
           fi
 
-          echo "✅ Latest stable in major $N8N_MAJOR: $latest_version"
-          echo "latest_version=$latest_version" >> $GITHUB_OUTPUT
-          echo "latest_overall=$latest_overall" >> $GITHUB_OUTPUT
+          echo "target_version=$target_version" >> $GITHUB_OUTPUT
+          echo "resolved=$resolved" >> $GITHUB_OUTPUT
           echo "held_major=$held_major" >> $GITHUB_OUTPUT
 
-      # Read the currently pinned version straight from fly.toml - the single
-      # source of truth. No flyctl, no FLY_API_TOKEN, no ':latest' trap.
+      # Current version = the explicit tag pinned in fly.toml (kept in sync by
+      # the deploy step below). No flyctl read, so ':latest' never enters here.
       - name: 📊 Read currently pinned version
-        id: current-version
+        id: current
         run: |
           source scripts/version-detection.sh
           current_version=$(read_pinned_version "fly.toml")
-          echo "📦 Currently pinned: ${current_version:-<untagged - will pin>}"
+          echo "📦 Currently pinned: ${current_version:-<untagged>}"
           echo "current_version=$current_version" >> $GITHUB_OUTPUT
 
-      # Decide whether the pin needs to move.
       - name: ⚖️ Compare versions
         id: compare
         run: |
           source scripts/version-detection.sh
-          current_version="${{ steps.current-version.outputs.current_version }}"
-          latest_version="${{ steps.detect-version.outputs.latest_version }}"
+          current_version="${{ steps.current.outputs.current_version }}"
+          target_version="${{ steps.detect.outputs.target_version }}"
 
-          echo "📦 Pinned:  ${current_version:-untagged}"
-          echo "🆕 Latest:  $latest_version"
+          echo "📦 Current:  ${current_version:-untagged}"
+          echo "🎯 Target:   ${target_version:-none (held or unresolved)}"
 
-          if needs_update "$current_version" "$latest_version"; then
-            echo "🚀 Decision: BUMP NEEDED -> $latest_version"
+          if needs_update "$current_version" "$target_version"; then
+            echo "🚀 Decision: DEPLOY $target_version"
             echo "needs_update=true" >> $GITHUB_OUTPUT
-            log_version_check "$current_version" "$latest_version" "bump needed"
+            log_version_check "$current_version" "$target_version" "deploy needed"
           else
-            echo "✅ Decision: ALREADY PINNED TO LATEST"
+            echo "✅ Decision: ALREADY ON TARGET"
             echo "needs_update=false" >> $GITHUB_OUTPUT
-            log_version_check "$current_version" "$latest_version" "no bump needed"
+            log_version_check "$current_version" "$target_version" "no deploy needed"
           fi
 
-      # Fetch release notes for the GitHub Actions summary (non-critical).
       - name: 📝 Fetch version update summary
         if: steps.compare.outputs.needs_update == 'true'
         continue-on-error: true
         run: |
           source scripts/version-detection.sh
-          current_version="${{ steps.current-version.outputs.current_version }}"
-          latest_version="${{ steps.detect-version.outputs.latest_version }}"
-          if notes=$(fetch_release_notes "$latest_version") && [ -n "$notes" ]; then
-            echo "✅ Fetched release notes for v${latest_version}"
-            create_version_summary "$current_version" "$latest_version"
+          current_version="${{ steps.current.outputs.current_version }}"
+          target_version="${{ steps.detect.outputs.target_version }}"
+          if notes=$(fetch_release_notes "$target_version") && [ -n "$notes" ]; then
+            create_version_summary "$current_version" "$target_version"
           else
             echo "⚠️ Release notes unavailable (non-critical)"
           fi
 
-      # Bump fly.toml and push. The Fly deploy-on-push trigger does the deploy.
-      # A push authored by GITHUB_TOKEN does NOT re-trigger this workflow (no
-      # loop), but the Fly GitHub App still receives the push and deploys.
-      - name: 🚀 Bump fly.toml and push
+      # Deploy the explicit version with flyctl (the reliable deployer).
+      - name: 🚀 Deploy to Fly.io
         if: steps.compare.outputs.needs_update == 'true'
-        id: bump
+        id: deploy
         run: |
           source scripts/version-detection.sh
-          latest_version="${{ steps.detect-version.outputs.latest_version }}"
+          target_version="${{ steps.detect.outputs.target_version }}"
+          app_name=$(grep "^app = " fly.toml | sed "s/^app = ['\"]//;s/['\"]$//")
 
-          bump_flytoml_image "fly.toml" "$latest_version"
-          echo "📌 Pinned fly.toml -> n8nio/n8n:$latest_version"
-          grep -E "^[[:space:]]*image[[:space:]]*=" fly.toml
+          if deploy_to_flyio "$target_version" "$app_name"; then
+            echo "✅ Deployed n8nio/n8n:$target_version"
+            echo "deployment_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Deployment failed"
+            echo "deployment_status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
+      # Confirm a machine is healthy before recording the version. n8n 2.x
+      # migrates before binding port 5678, so poll instead of one fixed delay.
+      - name: 🏥 Verify deployment health
+        if: steps.compare.outputs.needs_update == 'true' && steps.deploy.outputs.deployment_status == 'success'
+        run: |
+          source scripts/version-detection.sh
+          app_name=$(grep "^app = " fly.toml | sed "s/^app = ['\"]//;s/['\"]$//")
+
+          echo "🔍 Polling machine status (up to 120s for migrate + port bind)..."
+          healthy=false
+          for attempt in $(seq 1 8); do
+            sleep 15
+            if verify_deployment_health "$app_name"; then
+              healthy=true
+              echo "✅ Healthy after ~$((attempt * 15))s"
+              break
+            fi
+            echo "   … not ready yet (attempt ${attempt}/8), retrying"
+          done
+
+          if [ "$healthy" != "true" ]; then
+            echo "❌ ERROR: health check failed after 120s (Fly may roll back)"
+            exit 1
+          fi
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Record the deployed version in fly.toml so the next run's "current" is
+      # accurate and Fly's own trigger deploys the same explicit tag.
+      - name: 📌 Pin fly.toml to deployed version
+        if: steps.compare.outputs.needs_update == 'true' && steps.deploy.outputs.deployment_status == 'success'
+        run: |
+          source scripts/version-detection.sh
+          target_version="${{ steps.detect.outputs.target_version }}"
+
+          bump_flytoml_image "fly.toml" "$target_version"
           if git diff --quiet -- fly.toml; then
-            echo "ℹ️ fly.toml already at $latest_version, nothing to push"
-            echo "pushed=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ fly.toml already pinned to $target_version"
             exit 0
           fi
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add fly.toml
-          git commit \
-            -m "chore: bump n8n to ${latest_version}" \
-            -m "Auto-detected new stable release in major ${N8N_MAJOR}. Fly.io deploy-on-push trigger rolls this out."
+          git commit -m "chore: record deployed n8n version ${target_version}"
           git push
-          echo "pushed=true" >> $GITHUB_OUTPUT
-          echo "🚀 Pushed - Fly.io will deploy n8nio/n8n:$latest_version"
+          echo "📌 fly.toml pinned to $target_version"
 
-      # Summary, always runs.
       - name: 📝 Create workflow summary
         if: always()
         run: |
           source scripts/version-detection.sh
-          current_version="${{ steps.current-version.outputs.current_version }}"
-          latest_version="${{ steps.detect-version.outputs.latest_version }}"
+          current_version="${{ steps.current.outputs.current_version }}"
+          target_version="${{ steps.detect.outputs.target_version }}"
+          resolved="${{ steps.detect.outputs.resolved }}"
           needs_update="${{ steps.compare.outputs.needs_update }}"
-          pushed="${{ steps.bump.outputs.pushed }}"
+          deployment_status="${{ steps.deploy.outputs.deployment_status }}"
 
           if [ "$needs_update" = "true" ]; then
-            if [ "$pushed" = "true" ]; then
-              action="bumped to $latest_version (Fly.io deploying)"
+            if [ "$deployment_status" = "success" ]; then
+              action="deployed $target_version"
+            elif [ "$deployment_status" = "failed" ]; then
+              action="deployment failed"
             else
-              action="bump needed but nothing pushed"
+              action="deployment attempted"
             fi
           else
-            action="skipped - already pinned to latest"
+            action="skipped - already on ${current_version:-target}"
           fi
 
-          create_workflow_summary "$action" "$current_version" "$latest_version"
+          create_workflow_summary "$action" "$current_version" "${target_version:-$resolved}"
 
-          held_major="${{ steps.detect-version.outputs.held_major }}"
-          latest_overall="${{ steps.detect-version.outputs.latest_overall }}"
+          held_major="${{ steps.detect.outputs.held_major }}"
           if [ -n "$held_major" ] && [ -n "$GITHUB_STEP_SUMMARY" ]; then
             {
               echo ""
-              echo "> ⏸️ **Major upgrade held for manual approval:** v$latest_overall"
-              echo "> (major $held_major). Auto-bump is pinned to major"
-              echo "> \`$N8N_MAJOR\`. Bump \`N8N_MAJOR\` in the workflow to upgrade."
+              echo "> ⏸️ **Major held for manual approval:** n8n :latest is now"
+              echo "> v$resolved (major $held_major). Auto-deploy is pinned to"
+              echo "> major \`$N8N_MAJOR\`. Bump \`N8N_MAJOR\` to upgrade."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
