@@ -3414,3 +3414,49 @@ setup() {
     '
     [ -z "$output" ]
 }
+
+# ---------------------------------------------------------------------------
+# fly.toml as source of truth: read the pinned version and bump it. The
+# workflow edits fly.toml; the Fly deploy-on-push trigger deploys it.
+# ---------------------------------------------------------------------------
+
+@test "read_pinned_version - reads explicit tag from fly.toml" {
+    run bash -c '
+        source scripts/version-detection.sh
+        tmp=$(mktemp)
+        printf "[build]\n  image = '\''n8nio/n8n:2.27.1'\''\n" > "$tmp"
+        read_pinned_version "$tmp"
+        rm -f "$tmp"
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "2.27.1" ]
+}
+
+@test "read_pinned_version - untagged image yields empty (forces a pin)" {
+    run bash -c '
+        source scripts/version-detection.sh
+        tmp=$(mktemp)
+        printf "[build]\n  image = '\''n8nio/n8n'\''\n" > "$tmp"
+        read_pinned_version "$tmp"
+        rm -f "$tmp"
+    '
+    [ -z "$output" ]
+}
+
+@test "bump_flytoml_image - rewrites the image line, preserving indentation" {
+    run bash -c '
+        source scripts/version-detection.sh
+        tmp=$(mktemp)
+        printf "[build]\n  image = '\''n8nio/n8n:2.13.4'\''\n" > "$tmp"
+        bump_flytoml_image "$tmp" "2.27.1"
+        got=$(read_pinned_version "$tmp")
+        echo "line:$(grep image "$tmp")"
+        echo "got:$got"
+        rm -f "$tmp"
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "got:2.27.1" ]]
+    [[ ! "$output" =~ "2.13.4" ]]
+    # two-space indentation preserved
+    [[ "$output" =~ "line:  image" ]]
+}

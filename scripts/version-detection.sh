@@ -190,6 +190,31 @@ major_of() {
     echo "${1%%.*}"
 }
 
+# Read the pinned n8n version from fly.toml's [build] image line.
+# fly.toml is the single source of truth for the deployed version; the Fly
+# deploy-on-push trigger deploys whatever tag is pinned here.
+# Args: $1 - path to fly.toml (default: fly.toml)
+# Returns: the version tag (e.g. 2.27.1), or empty if the image is untagged
+read_pinned_version() {
+    local flytoml="${1:-fly.toml}"
+    local image
+    image=$(grep -E "^[[:space:]]*image[[:space:]]*=" "$flytoml" 2>/dev/null \
+        | head -1 \
+        | sed -E "s/.*=[[:space:]]*['\"]([^'\"]+)['\"].*/\1/")
+    parse_version_from_image "$image"
+}
+
+# Rewrite fly.toml's [build] image line to pin a specific n8n version,
+# preserving the original indentation.
+# Args: $1 - path to fly.toml, $2 - version tag to pin
+bump_flytoml_image() {
+    local flytoml="$1"
+    local version="$2"
+    # -i.bak then rm keeps this portable across GNU sed (Linux/CI) and BSD sed (macOS)
+    sed -i.bak -E "s|^([[:space:]]*image[[:space:]]*=[[:space:]]*).*|\1'n8nio/n8n:${version}'|" "$flytoml"
+    rm -f "${flytoml}.bak"
+}
+
 # Parse the version tag out of a container image reference.
 # Handles repo:tag, registry/host:port style refs, and an optional @sha256
 # digest suffix. A pure digest (no tag) returns empty - the version is unknown,
